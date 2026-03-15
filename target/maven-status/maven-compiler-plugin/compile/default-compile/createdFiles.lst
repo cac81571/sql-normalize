@@ -1,4 +1,5 @@
 com\sqlnormalize\SqlNormalizer.class
+com\sqlnormalize\H2ConnectionPanel.class
+com\sqlnormalize\SqlNormalizer$1.class
 com\sqlnormalize\SqlNormalizeApp$1.class
 com\sqlnormalize\SqlNormalizeApp.class
-com\sqlnormalize\SqlNormalizer$1.class

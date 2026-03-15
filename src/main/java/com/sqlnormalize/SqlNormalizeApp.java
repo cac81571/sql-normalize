@@ -7,10 +7,12 @@ import java.awt.*;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 
 /**
  * 移行前・移行後SQLを貼り付けて正規化し、比較するSwingアプリケーションのメインクラス。
@@ -27,6 +29,11 @@ public class SqlNormalizeApp {
     private static final String DELIM_BEFORE = "\n---BEFORE---\n";
     /** 保存ファイル内で「移行後」ブロックの区切り文字列。 */
     private static final String DELIM_AFTER = "\n---AFTER---\n";
+
+    /** P6Spy 設定のテンプレートリソース名。 */
+    private static final String SPY_PROPERTIES_TEMPLATE = "/spy.properties.template";
+    /** 作業ディレクトリに作成する P6Spy 設定ファイル名。 */
+    private static final String SPY_PROPERTIES_FILE = "spy.properties";
 
     /** SQL正規化処理を行うインスタンス。 */
     private final SqlNormalizer normalizer = new SqlNormalizer();
@@ -47,10 +54,25 @@ public class SqlNormalizeApp {
      * @param args コマンドライン引数（未使用）
      */
     public static void main(String[] args) {
+        ensureSpyPropertiesFromTemplate();
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
         } catch (Exception ignored) {}
         SwingUtilities.invokeLater(() -> new SqlNormalizeApp().createAndShow());
+    }
+
+    /**
+     * 作業ディレクトリに spy.properties が無い場合、クラスパスのテンプレートから作成する。
+     * P6Spy がログ出力先等を読むため、H2接続前に呼ぶこと。
+     */
+    private static void ensureSpyPropertiesFromTemplate() {
+        Path target = Paths.get(System.getProperty("user.dir", "."), SPY_PROPERTIES_FILE);
+        if (Files.exists(target)) return;
+        try (InputStream in = SqlNormalizeApp.class.getResourceAsStream(SPY_PROPERTIES_TEMPLATE)) {
+            if (in != null) {
+                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException ignored) {}
     }
 
     /**
@@ -107,8 +129,12 @@ public class SqlNormalizeApp {
 
         loadState();
 
-        frame.setContentPane(main);
-        frame.setSize(920, 720);
+        JTabbedPane tabs = new JTabbedPane();
+        tabs.addTab("SQL比較", main);
+        tabs.addTab("H2接続・実行", new H2ConnectionPanel());
+
+        frame.setContentPane(tabs);
+        frame.setSize(960, 760);
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
     }
