@@ -16,8 +16,9 @@ import java.util.List;
 /**
  * A5:SQL Mk-2 に近い読みやすさを目指した SQL 整形（SELECT 中心）。
  * <p>
- * 方針: SELECT リストは列ごとに改行し、2 列目以降は行頭に {@code , }（カンマ＋半角空白）を付ける。GROUP BY / ORDER BY のカンマ区切りも同様。FROM/JOIN/WHERE を句ごとに改行、
- * WHERE / HAVING では式木上の {@code AND}・{@code OR} の前で改行する。JOIN の {@code ON} 句も同様だが、{@code AND}/{@code OR} 行は {@code ON} と同じインデントに揃える。
+ * 正規化用（{@link #formatSelect(Statement)}）では SELECT / GROUP BY / ORDER BY の列リストを {@code 式, 式, …} と 1 行に並べる。
+ * 整形ペイン用（{@link #formatSelect(Statement, boolean)} で {@code true}）では行頭 {@code , } ＋改行＋インデントで複行にする。
+ * FROM/JOIN/WHERE を句ごとに改行、WHERE / HAVING では {@code AND}・{@code OR} の前で改行する。
  * {@code EXISTS} / {@code IN (SELECT …)} 内の {@link SubSelect} は {@link #appendSelectBody} で複行整形する。
  * </p>
  */
@@ -29,8 +30,16 @@ public final class SqlA5Formatter {
 
     /**
      * Statement を A5 風に整形する。SELECT 以外は null を返す（呼び出し側で従来の整形にフォールバック）。
+     * 列リストは {@code 式, 式} で 1 行（正規化・グリッド用）。
      */
     public static String formatSelect(Statement stmt) {
+        return formatSelect(stmt, false);
+    }
+
+    /**
+     * @param leadingCommaItemLists {@code true} のとき SELECT / GROUP BY / ORDER BY の要素を行頭カンマ付きで複行にする（整形ペイン用）
+     */
+    public static String formatSelect(Statement stmt, boolean leadingCommaItemLists) {
         if (!(stmt instanceof Select)) {
             return null;
         }
@@ -40,24 +49,30 @@ public final class SqlA5Formatter {
         if (withList != null && !withList.isEmpty()) {
             sb.append("WITH");
             for (int i = 0; i < withList.size(); i++) {
-                if (i > 0) sb.append(",");
+                if (i > 0) {
+                    sb.append(",");
+                }
                 sb.append("\n");
                 WithItem w = withList.get(i);
                 sb.append(IND).append(w.getName()).append(" AS (\n");
                 SelectBody wb = w.getSubSelect().getSelectBody();
-                appendSelectBody(sb, wb, IND + IND);
+                appendSelectBody(sb, wb, IND + IND, leadingCommaItemLists);
                 sb.append("\n").append(IND).append(")");
             }
             sb.append("\n");
         }
-        appendSelectBody(sb, select.getSelectBody(), "");
+        appendSelectBody(sb, select.getSelectBody(), "", leadingCommaItemLists);
         return sb.toString().trim();
     }
 
-    /** INSERT の WITH 内サブクエリなどからも利用する。 */
+    /** INSERT の WITH 内サブクエリなどからも利用する（列リストは 1 行）。 */
     static void appendSelectBody(StringBuilder sb, SelectBody body, String prefix) {
+        appendSelectBody(sb, body, prefix, false);
+    }
+
+    static void appendSelectBody(StringBuilder sb, SelectBody body, String prefix, boolean leadingCommaItemLists) {
         if (body instanceof PlainSelect) {
-            appendPlainSelect(sb, (PlainSelect) body, prefix);
+            appendPlainSelect(sb, (PlainSelect) body, prefix, leadingCommaItemLists);
         } else if (body instanceof SetOperationList) {
             SetOperationList list = (SetOperationList) body;
             List<SelectBody> selects = list.getSelects();
@@ -67,63 +82,89 @@ public final class SqlA5Formatter {
                     SetOperation op = ops.get(i - 1);
                     sb.append("\n").append(op.toString()).append("\n");
                 }
-                appendSelectBody(sb, selects.get(i), prefix);
+                appendSelectBody(sb, selects.get(i), prefix, leadingCommaItemLists);
             }
         } else {
             sb.append(prefix).append(body.toString());
         }
     }
 
-    private static void appendPlainSelect(StringBuilder sb, PlainSelect plain, String prefix) {
+    private static void appendPlainSelect(StringBuilder sb, PlainSelect plain, String prefix, boolean leadingComma) {
         sb.append(prefix).append("SELECT");
         if (plain.getDistinct() != null) {
             sb.append(" ").append(plain.getDistinct());
         }
-        sb.append("\n");
-
         List<SelectItem> items = plain.getSelectItems();
-        if (items != null) {
-            for (int i = 0; i < items.size(); i++) {
-                sb.append(prefix).append(IND);
-                if (i > 0) {
-                    sb.append(", ");
+        if (items != null && !items.isEmpty()) {
+            if (leadingComma) {
+                sb.append("\n");
+                for (int i = 0; i < items.size(); i++) {
+                    sb.append(prefix).append(IND);
+                    if (i > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(items.get(i).toString());
+                    sb.append("\n");
                 }
-                sb.append(items.get(i).toString());
+            } else {
+                sb.append(" ");
+                for (int i = 0; i < items.size(); i++) {
+                    if (i > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(items.get(i).toString());
+                }
                 sb.append("\n");
             }
+        } else {
+            sb.append("\n");
         }
 
         FromItem from = plain.getFromItem();
         if (from != null) {
             sb.append(prefix).append("FROM\n");
-            sb.append(prefix).append(IND).append(fromToString(from)).append("\n");
+            sb.append(prefix).append(IND).append(fromToString(from, leadingComma)).append("\n");
         }
 
         List<Join> joins = plain.getJoins();
         if (joins != null) {
             for (Join j : joins) {
-                appendJoin(sb, j, prefix);
+                appendJoin(sb, j, prefix, leadingComma);
             }
         }
 
         Expression where = plain.getWhere();
         if (where != null) {
             sb.append(prefix).append("WHERE\n");
-            appendWhereConditions(sb, where, prefix + IND);
+            appendWhereConditions(sb, where, prefix + IND, leadingComma);
         }
 
         if (plain.getGroupBy() != null) {
-            sb.append(prefix).append("GROUP BY\n");
+            sb.append(prefix).append("GROUP BY");
             List<Expression> exps = plain.getGroupBy().getGroupByExpressions();
-            if (exps != null) {
-                for (int i = 0; i < exps.size(); i++) {
-                    sb.append(prefix).append(IND);
-                    if (i > 0) {
-                        sb.append(", ");
+            if (exps != null && !exps.isEmpty()) {
+                if (leadingComma) {
+                    sb.append("\n");
+                    for (int i = 0; i < exps.size(); i++) {
+                        sb.append(prefix).append(IND);
+                        if (i > 0) {
+                            sb.append(", ");
+                        }
+                        sb.append(exps.get(i).toString());
+                        sb.append("\n");
                     }
-                    sb.append(exps.get(i).toString());
+                } else {
+                    sb.append(" ");
+                    for (int i = 0; i < exps.size(); i++) {
+                        if (i > 0) {
+                            sb.append(", ");
+                        }
+                        sb.append(exps.get(i).toString());
+                    }
                     sb.append("\n");
                 }
+            } else {
+                sb.append("\n");
             }
         }
 
@@ -131,19 +172,31 @@ public final class SqlA5Formatter {
         if (having != null) {
             sb.append(prefix).append("HAVING\n");
             sb.append(prefix).append(IND);
-            appendExpressionBrokenOnAndOr(sb, having, prefix + IND);
+            appendExpressionBrokenOnAndOr(sb, having, prefix + IND, leadingComma);
             sb.append("\n");
         }
 
         List<OrderByElement> orderBy = plain.getOrderByElements();
         if (orderBy != null && !orderBy.isEmpty()) {
-            sb.append(prefix).append("ORDER BY\n");
-            for (int i = 0; i < orderBy.size(); i++) {
-                sb.append(prefix).append(IND);
-                if (i > 0) {
-                    sb.append(", ");
+            sb.append(prefix).append("ORDER BY");
+            if (leadingComma) {
+                sb.append("\n");
+                for (int i = 0; i < orderBy.size(); i++) {
+                    sb.append(prefix).append(IND);
+                    if (i > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(orderBy.get(i).toString());
+                    sb.append("\n");
                 }
-                sb.append(orderBy.get(i).toString());
+            } else {
+                sb.append(" ");
+                for (int i = 0; i < orderBy.size(); i++) {
+                    if (i > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(orderBy.get(i).toString());
+                }
                 sb.append("\n");
             }
         }
@@ -159,12 +212,12 @@ public final class SqlA5Formatter {
         }
     }
 
-    private static String fromToString(FromItem from) {
+    private static String fromToString(FromItem from, boolean leadingComma) {
         if (from instanceof SubSelect) {
             SubSelect ss = (SubSelect) from;
             StringBuilder inner = new StringBuilder();
             inner.append("(\n");
-            appendSelectBody(inner, ss.getSelectBody(), IND);
+            appendSelectBody(inner, ss.getSelectBody(), IND, leadingComma);
             inner.append("\n) ");
             if (ss.getAlias() != null) {
                 inner.append(ss.getAlias().toString());
@@ -176,15 +229,18 @@ public final class SqlA5Formatter {
 
     /** {@code UPDATE … FROM} の {@code JOIN} 行でも利用する。 */
     static void appendJoin(StringBuilder sb, Join j, String prefix) {
+        appendJoin(sb, j, prefix, false);
+    }
+
+    static void appendJoin(StringBuilder sb, Join j, String prefix, boolean leadingCommaSelectItems) {
         sb.append(prefix).append(IND).append(joinTypeName(j)).append(" ");
         sb.append(j.getRightItem().toString());
         sb.append("\n");
         Expression on = j.getOnExpression();
         if (on != null) {
-            // JOIN 行より一段深く。AND/OR 行は ON と同じインデント（「ON 」より後ろには下げない）
             String onHead = prefix + IND + IND;
             sb.append(onHead).append("ON ");
-            appendExpressionBrokenOnAndOr(sb, on, onHead);
+            appendExpressionBrokenOnAndOr(sb, on, onHead, leadingCommaSelectItems);
             sb.append("\n");
         }
     }
@@ -194,8 +250,12 @@ public final class SqlA5Formatter {
             return "CROSS JOIN";
         }
         if (join.isNatural()) {
-            if (join.isLeft()) return "NATURAL LEFT JOIN";
-            if (join.isRight()) return "NATURAL RIGHT JOIN";
+            if (join.isLeft()) {
+                return "NATURAL LEFT JOIN";
+            }
+            if (join.isRight()) {
+                return "NATURAL RIGHT JOIN";
+            }
             return "NATURAL JOIN";
         }
         if (join.isFull()) {
@@ -213,29 +273,30 @@ public final class SqlA5Formatter {
         return "INNER JOIN";
     }
 
-    private static void appendWhereConditions(StringBuilder sb, Expression where, String condIndent) {
+    private static void appendWhereConditions(StringBuilder sb, Expression where, String condIndent, boolean leadingComma) {
         sb.append(condIndent);
-        appendExpressionBrokenOnAndOr(sb, where, condIndent);
+        appendExpressionBrokenOnAndOr(sb, where, condIndent, leadingComma);
         sb.append("\n");
     }
 
     /**
-     * 式木をたどり、{@code AND} / {@code OR} の直前で改行する（括弧内が AND/OR のときは括弧内も改行）。
-     *
-     * @param contIndent 改行後に付けるインデント（{@code AND}/{@code OR} 行頭にも同じ幅を使う）
+     * 式木をたどり、{@code AND} / {@code OR} の直前で改行する。
      */
-    /** {@code UPDATE} / {@code SELECT} の {@code WHERE}・{@code ON} 等で共有する。 */
     static void appendExpressionBrokenOnAndOr(StringBuilder sb, Expression e, String contIndent) {
+        appendExpressionBrokenOnAndOr(sb, e, contIndent, false);
+    }
+
+    static void appendExpressionBrokenOnAndOr(StringBuilder sb, Expression e, String contIndent, boolean leadingCommaSelectItems) {
         if (e instanceof AndExpression) {
             AndExpression a = (AndExpression) e;
-            appendExpressionBrokenOnAndOr(sb, a.getLeftExpression(), contIndent);
+            appendExpressionBrokenOnAndOr(sb, a.getLeftExpression(), contIndent, leadingCommaSelectItems);
             sb.append("\n").append(contIndent).append("AND ");
-            appendExpressionBrokenOnAndOr(sb, a.getRightExpression(), contIndent);
+            appendExpressionBrokenOnAndOr(sb, a.getRightExpression(), contIndent, leadingCommaSelectItems);
         } else if (e instanceof OrExpression) {
             OrExpression o = (OrExpression) e;
-            appendExpressionBrokenOnAndOr(sb, o.getLeftExpression(), contIndent);
+            appendExpressionBrokenOnAndOr(sb, o.getLeftExpression(), contIndent, leadingCommaSelectItems);
             sb.append("\n").append(contIndent).append("OR ");
-            appendExpressionBrokenOnAndOr(sb, o.getRightExpression(), contIndent);
+            appendExpressionBrokenOnAndOr(sb, o.getRightExpression(), contIndent, leadingCommaSelectItems);
         } else if (e instanceof Parenthesis) {
             Parenthesis p = (Parenthesis) e;
             Expression inner = p.getExpression();
@@ -245,12 +306,12 @@ public final class SqlA5Formatter {
             }
             if (inner instanceof AndExpression || inner instanceof OrExpression) {
                 sb.append("(\n").append(contIndent + IND);
-                appendExpressionBrokenOnAndOr(sb, inner, contIndent + IND);
+                appendExpressionBrokenOnAndOr(sb, inner, contIndent + IND, leadingCommaSelectItems);
                 sb.append("\n").append(contIndent).append(")");
             } else {
                 SubSelect ss = unwrapToSubSelect(inner);
                 if (ss != null) {
-                    appendBracketedSubSelect(sb, ss, contIndent);
+                    appendBracketedSubSelect(sb, ss, contIndent, leadingCommaSelectItems);
                 } else {
                     sb.append("(").append(inner.toString()).append(")");
                 }
@@ -258,11 +319,11 @@ public final class SqlA5Formatter {
         } else if (e instanceof ExistsExpression) {
             ExistsExpression ex = (ExistsExpression) e;
             sb.append(ex.isNot() ? "NOT EXISTS " : "EXISTS ");
-            appendFormattedSubSelectFromExpr(sb, ex.getRightExpression(), contIndent);
+            appendFormattedSubSelectFromExpr(sb, ex.getRightExpression(), contIndent, leadingCommaSelectItems);
         } else if (e instanceof InExpression) {
             InExpression in = (InExpression) e;
             if (in.getLeftExpression() != null) {
-                appendExpressionBrokenOnAndOr(sb, in.getLeftExpression(), contIndent);
+                appendExpressionBrokenOnAndOr(sb, in.getLeftExpression(), contIndent, leadingCommaSelectItems);
             }
             sb.append(in.isNot() ? " NOT IN " : " IN ");
             SubSelect inSs = null;
@@ -273,7 +334,7 @@ public final class SqlA5Formatter {
                 inSs = (SubSelect) in.getRightItemsList();
             }
             if (inSs != null) {
-                appendBracketedSubSelect(sb, inSs, contIndent);
+                appendBracketedSubSelect(sb, inSs, contIndent, leadingCommaSelectItems);
             } else if (in.getRightItemsList() != null) {
                 sb.append(in.getRightItemsList().toString());
             } else if (in.getRightExpression() != null) {
@@ -284,30 +345,29 @@ public final class SqlA5Formatter {
         } else if (e instanceof NotExpression) {
             NotExpression ne = (NotExpression) e;
             sb.append("NOT ");
-            appendExpressionBrokenOnAndOr(sb, ne.getExpression(), contIndent);
+            appendExpressionBrokenOnAndOr(sb, ne.getExpression(), contIndent, leadingCommaSelectItems);
         } else if (e instanceof SubSelect) {
-            appendBracketedSubSelect(sb, (SubSelect) e, contIndent);
+            appendBracketedSubSelect(sb, (SubSelect) e, contIndent, leadingCommaSelectItems);
         } else {
             sb.append(e.toString());
         }
     }
 
-    /** {@code ( SELECT ... )} を {@link #appendSelectBody} で整形して付与する。 */
-    private static void appendBracketedSubSelect(StringBuilder sb, SubSelect ss, String contIndent) {
+    private static void appendBracketedSubSelect(StringBuilder sb, SubSelect ss, String contIndent, boolean leadingComma) {
         if (ss == null || ss.getSelectBody() == null) {
             sb.append("()");
             return;
         }
         String innerPrefix = contIndent + IND;
         sb.append("(\n");
-        appendSelectBody(sb, ss.getSelectBody(), innerPrefix);
+        appendSelectBody(sb, ss.getSelectBody(), innerPrefix, leadingComma);
         sb.append("\n").append(contIndent).append(")");
     }
 
-    private static void appendFormattedSubSelectFromExpr(StringBuilder sb, Expression expr, String contIndent) {
+    private static void appendFormattedSubSelectFromExpr(StringBuilder sb, Expression expr, String contIndent, boolean leadingComma) {
         SubSelect ss = unwrapToSubSelect(expr);
         if (ss != null) {
-            appendBracketedSubSelect(sb, ss, contIndent);
+            appendBracketedSubSelect(sb, ss, contIndent, leadingComma);
         } else if (expr != null) {
             sb.append(expr.toString());
         }

@@ -24,9 +24,9 @@ import java.util.regex.Pattern;
  *   <li>全カラムを {@code tN}.{@code カラム名} 形式で修飾（{@code DUAL} 由来の列は修飾なし）。{@code t} 番号は文全体で連番。相関参照は外側スコープの {@code tN} に置換</li>
  *   <li>SELECT項目のエイリアス（AS 別名）を除去</li>
  *   <li>SQLキーワード・空白の正規化（大文字統一、連続空白を1スペースに）</li>
- *   <li>SELECT 文は A5:SQL Mk-2 に近い整形（SELECT/GROUP BY/ORDER BY の列は行頭カンマ、句ごとの改行、WHERE/ON/HAVING の AND・OR 前改行など）</li>
- *   <li>INSERT 文は {@code INSERT} / {@code INTO 表(} / 列リストと {@code VALUES} リストを行頭カンマ・インデント付きで複行整形</li>
- *   <li>UPDATE 文は {@code SET} を行頭カンマ、{@code WHERE} を {@code AND}/{@code OR} 前改行で複行整形</li>
+ *   <li>SELECT 文は A5:SQL Mk-2 に近い整形（正規化結果では SELECT/GROUP BY/ORDER BY の列リストは {@code 列, 列} と 1 行。整形ペインでは行頭 {@code , } で複行。FROM 以降は句ごとの改行、WHERE/ON/HAVING の AND・OR 前改行などは共通）</li>
+ *   <li>INSERT 文は正規化結果では {@code INTO 表 (列, 列, …)} と {@code VALUES (式, 式, …)} を 1 行。整形ペインでは列リスト・{@code VALUES} 各式を行頭カンマで複行。複数行 {@code VALUES} は {@code ),} 改行後に次のタプルをインデント。{@code INSERT} の {@code VALUES} 列名コメントは {@link #formatNormalizedSqlForDisplayPane} のみ</li>
+ *   <li>UPDATE 文は正規化結果では {@code SET} を {@code 列 = 式, …} で 1 行。整形ペインでは行頭 {@code , } で複行。{@code WHERE} は {@code AND}/{@code OR} 前改行で複行整形</li>
  *   <li>DELETE 文は {@code DELETE} / {@code FROM} / 表名を改行で分け、{@code WHERE} を {@code AND}/{@code OR} 前改行で複行整形</li>
  *   <li>上記以外の文は従来の句単位整形（{@link #formatPretty}）</li>
  * </ul>
@@ -100,6 +100,38 @@ public class SqlNormalizer {
             return stripSpacesBeforeCommaOutsideStrings(normalizeParsed(stmt));
         } catch (Exception e) {
             return stripSpacesBeforeCommaOutsideStrings(normalizeFallback(trimmed));
+        }
+    }
+
+    /**
+     * 整形ペイン（および Excel 用 HTML 表の SQL セル）表示用。
+     * 既に正規化済みの 1 文を再パースし、SELECT / INSERT / UPDATE について列リスト・{@code VALUES}・{@code SET} を
+     * 行頭カンマ＋改行＋インデントの複行にしたうえでキーワード大文字化・カンマ前空白除去を適用する。
+     * {@code INSERT} で列リストと式の個数が一致するときは {@code VALUES} 各式の直後に列名のブロックコメントを付ける。
+     * 上記以外の文種、またはパースに失敗した場合は {@code normalizedSql} をそのまま返す。
+     *
+     * @param normalizedSql {@link #normalize(String)} 済みなどの 1 文
+     */
+    public String formatNormalizedSqlForDisplayPane(String normalizedSql) {
+        if (normalizedSql == null || normalizedSql.trim().isEmpty()) {
+            return "";
+        }
+        String trimmed = normalizedSql.trim();
+        try {
+            Statement stmt = CCJSqlParserUtil.parse(trimmed);
+            String formatted;
+            if (stmt instanceof Select) {
+                formatted = SqlA5Formatter.formatSelect(stmt, true);
+            } else if (stmt instanceof Insert) {
+                formatted = SqlInsertFormatter.formatInsert((Insert) stmt, true, true);
+            } else if (stmt instanceof Update) {
+                formatted = SqlUpdateFormatter.formatUpdate((Update) stmt, true);
+            } else {
+                return normalizedSql;
+            }
+            return stripSpacesBeforeCommaOutsideStrings(uppercaseKeywordsMultiline(formatted));
+        } catch (Exception e) {
+            return normalizedSql;
         }
     }
 

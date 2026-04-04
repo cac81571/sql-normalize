@@ -17,7 +17,12 @@ import java.util.List;
 import net.sf.jsqlparser.statement.select.PlainSelect;
 
 /**
- * {@code UPDATE} 文を {@code SET} は行頭カンマ、{@code WHERE} は {@code AND}/{@code OR} 前改行で整形する。
+ * {@code UPDATE} 文の整形。
+ * <p>
+ * 正規化用（{@link #formatUpdate(Update)}）では {@code SET} の代入を {@code 列 = 式, …} で 1 行。
+ * 整形ペイン用（{@link #formatUpdate(Update, boolean)} で {@code true}）では行頭 {@code , } で複行。
+ * {@code WHERE} は {@code AND}/{@code OR} 前改行。
+ * </p>
  */
 public final class SqlUpdateFormatter {
 
@@ -27,11 +32,19 @@ public final class SqlUpdateFormatter {
 
     @SuppressWarnings("rawtypes")
     public static String formatUpdate(Update update) {
+        return formatUpdate(update, false);
+    }
+
+    /**
+     * @param leadingCommaSet {@code true} のとき {@code SET} の各代入を行頭カンマ付きで複行（整形ペイン用）
+     */
+    @SuppressWarnings("rawtypes")
+    public static String formatUpdate(Update update, boolean leadingCommaSet) {
         if (update == null) {
             return "";
         }
         StringBuilder sb = new StringBuilder();
-        appendWith(sb, update);
+        appendWith(sb, update, leadingCommaSet);
 
         sb.append("UPDATE ");
         OracleHint hint = update.getOracleHint();
@@ -48,14 +61,14 @@ public final class SqlUpdateFormatter {
         }
         sb.append("\n");
 
-        appendSetClause(sb, update);
-        appendFromAndJoins(sb, update);
+        appendSetClause(sb, update, leadingCommaSet);
+        appendFromAndJoins(sb, update, leadingCommaSet);
 
         Expression where = update.getWhere();
         if (where != null) {
             sb.append("WHERE\n");
             sb.append(IND);
-            SqlA5Formatter.appendExpressionBrokenOnAndOr(sb, where, IND);
+            SqlA5Formatter.appendExpressionBrokenOnAndOr(sb, where, IND, leadingCommaSet);
             sb.append("\n");
         }
 
@@ -83,7 +96,7 @@ public final class SqlUpdateFormatter {
     }
 
     @SuppressWarnings("rawtypes")
-    private static void appendWith(StringBuilder sb, Update update) {
+    private static void appendWith(StringBuilder sb, Update update, boolean leadingCommaSelectItems) {
         List withList = update.getWithItemsList();
         if (withList == null || withList.isEmpty()) {
             return;
@@ -97,29 +110,38 @@ public final class SqlUpdateFormatter {
             WithItem w = (WithItem) withList.get(i);
             sb.append(IND).append(w.getName()).append(" AS (\n");
             SelectBody wb = w.getSubSelect().getSelectBody();
-            SqlA5Formatter.appendSelectBody(sb, wb, IND + IND);
+            SqlA5Formatter.appendSelectBody(sb, wb, IND + IND, leadingCommaSelectItems);
             sb.append("\n").append(IND).append(")");
         }
         sb.append("\n");
     }
 
     @SuppressWarnings("rawtypes")
-    private static void appendSetClause(StringBuilder sb, Update update) {
+    private static void appendSetClause(StringBuilder sb, Update update, boolean leadingCommaSet) {
         ArrayList updateSets = update.getUpdateSets();
         if (updateSets == null || updateSets.isEmpty()) {
             return;
         }
-        sb.append("SET\n");
-        boolean firstAssign = true;
-        for (Object o : updateSets) {
-            UpdateSet us = (UpdateSet) o;
-            firstAssign = appendUpdateSetAssignments(sb, us, firstAssign);
+        if (leadingCommaSet) {
+            sb.append("SET\n");
+            boolean firstAssign = true;
+            for (Object o : updateSets) {
+                UpdateSet us = (UpdateSet) o;
+                firstAssign = appendUpdateSetAssignments(sb, us, firstAssign, true);
+            }
+        } else {
+            sb.append("SET ");
+            boolean firstAssign = true;
+            for (Object o : updateSets) {
+                UpdateSet us = (UpdateSet) o;
+                firstAssign = appendUpdateSetAssignments(sb, us, firstAssign, false);
+            }
+            sb.append("\n");
         }
     }
 
-    /** @return 続く {@link UpdateSet} 用の「先頭の代入行かどうか」（先頭なら {@code true}） */
     @SuppressWarnings("rawtypes")
-    private static boolean appendUpdateSetAssignments(StringBuilder sb, UpdateSet us, boolean firstAssign) {
+    private static boolean appendUpdateSetAssignments(StringBuilder sb, UpdateSet us, boolean firstAssign, boolean multilineSet) {
         List cols = us.getColumns();
         List exprs = us.getExpressions();
         if (cols == null || exprs == null || cols.isEmpty()) {
@@ -127,9 +149,15 @@ public final class SqlUpdateFormatter {
         }
 
         if (us.isUsingBracketsForColumns() || us.isUsingBracketsForValues()) {
-            sb.append(IND);
-            if (!firstAssign) {
-                sb.append(", ");
+            if (multilineSet) {
+                sb.append(IND);
+                if (!firstAssign) {
+                    sb.append(", ");
+                }
+            } else {
+                if (!firstAssign) {
+                    sb.append(", ");
+                }
             }
             if (us.isUsingBracketsForColumns()) {
                 sb.append("(");
@@ -156,25 +184,35 @@ public final class SqlUpdateFormatter {
             if (us.isUsingBracketsForValues()) {
                 sb.append(")");
             }
-            sb.append("\n");
+            if (multilineSet) {
+                sb.append("\n");
+            }
             return false;
         }
 
         int n = Math.min(cols.size(), exprs.size());
         for (int i = 0; i < n; i++) {
-            sb.append(IND);
-            if (!firstAssign) {
-                sb.append(", ");
+            if (multilineSet) {
+                sb.append(IND);
+                if (!firstAssign) {
+                    sb.append(", ");
+                }
+                firstAssign = false;
+                sb.append(cols.get(i).toString()).append(" = ").append(exprs.get(i).toString());
+                sb.append("\n");
+            } else {
+                if (!firstAssign) {
+                    sb.append(", ");
+                }
+                firstAssign = false;
+                sb.append(cols.get(i).toString()).append(" = ").append(exprs.get(i).toString());
             }
-            firstAssign = false;
-            sb.append(cols.get(i).toString()).append(" = ").append(exprs.get(i).toString());
-            sb.append("\n");
         }
         return firstAssign;
     }
 
     @SuppressWarnings("rawtypes")
-    private static void appendFromAndJoins(StringBuilder sb, Update update) {
+    private static void appendFromAndJoins(StringBuilder sb, Update update, boolean leadingCommaSelectItems) {
         FromItem fromItem = update.getFromItem();
         if (fromItem == null) {
             return;
@@ -184,7 +222,7 @@ public final class SqlUpdateFormatter {
         List joins = update.getJoins();
         if (joins != null) {
             for (Object j : joins) {
-                SqlA5Formatter.appendJoin(sb, (Join) j, "");
+                SqlA5Formatter.appendJoin(sb, (Join) j, "", leadingCommaSelectItems);
             }
         }
     }

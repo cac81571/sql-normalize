@@ -22,7 +22,6 @@ import javax.swing.text.StyledEditorKit;
 import javax.swing.text.View;
 import javax.swing.text.ViewFactory;
 import java.awt.*;
-import java.awt.datatransfer.StringSelection;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -42,7 +41,7 @@ import java.nio.file.StandardCopyOption;
 /**
  * 移行前・移行後SQLを貼り付けて正規化し、比較するSwingアプリケーションのメインクラス。
  * <p>
- * 上部に移行前/移行後SQLの入力エリア（複数文は {@code ;} 区切り）、中央に正規化ボタン、正規化済み文の一覧グリッド、正規化結果コピーボタン、整形詳細ペインを表示する。
+ * 移行前/移行後SQLの入力エリア（複数文は {@code ;} 区切り）、正規化ボタン、正規化済み文の一覧グリッド、正規化結果コピーボタン、整形詳細ペインを、縦スプリットで入力＋ボタン／（グリッド＋コピー／整形）のように配置する。
  * 終了時に入力内容をファイルへ保存し、次回起動時に復元する。
  * </p>
  */
@@ -73,10 +72,16 @@ public class SqlNormalizeApp {
     private final List<String> beforeNormStatements = new ArrayList<>();
     /** 移行後: 正規化済み各文。 */
     private final List<String> afterNormStatements = new ArrayList<>();
-    /** 移行前: #・比較・SQL 列のグリッド。 */
+    /** 移行前: #・比較・正規化SQL 列のグリッド。 */
     private JTable beforeStmtGrid;
-    /** 移行後: #・比較・SQL 列のグリッド。 */
+    /** 移行後: #・比較・正規化SQL 列のグリッド。 */
     private JTable afterStmtGrid;
+    /** 正規化グリッドで「差異」行だけ表示するフィルタ。 */
+    private JCheckBox showDiffRowsOnlyCheck;
+    /** 移行前グリッドの表示行 → 正規化文インデックス（0 始まり）。 */
+    private int[] beforeGridStmtIndexMap = new int[0];
+    /** 移行後グリッドの表示行 → 正規化文インデックス。 */
+    private int[] afterGridStmtIndexMap = new int[0];
     /** プログラムによるグリッド選択（連動・正規化直後）のとき、リスナーによる二重更新・再入を抑止する。 */
     private boolean gridSelectionProgrammatic;
     /** 移行前SQLの正規化結果表示（キーワード青・エイリアス等は灰色）。 */
@@ -92,6 +97,9 @@ public class SqlNormalizeApp {
 
     /** 正規化テーブル別名 {@code t1}. ～ {@code t9…} の表示色。 */
     private static final Color TABLE_ALIAS_FOREGROUND = new Color(188, 188, 188);
+
+    /** Excel HTML 貼り付けで罫線が消えないよう、セルごとに明示する枠線（ネスト表の border:none は避ける）。 */
+    private static final String EXCEL_HTML_CELL_BORDER = "border:1px solid #808080;";
 
     /** 文字列・数値リテラルの表示色。 */
     private static final Color SQL_LITERAL_FOREGROUND = new Color(128, 0, 160);
@@ -156,7 +164,7 @@ public class SqlNormalizeApp {
 
     /**
      * メインウィンドウを構築し、表示する。
-     * 上部に移行前/移行後入力、中央に正規化ボタンと移行前（正規化）/移行後（正規化）グリッド、グリッドと整形ペインの間に正規化結果コピーボタン、整形ペインを配置する。
+     * 縦スプリットの上段に移行前/移行後入力と正規化ボタン、下段をさらに縦スプリットし上に正規化グリッド・差異フィルタ・コピーボタン、下に整形ペインを配置する。
      */
     private void createAndShow() {
         JFrame frame = new JFrame("SQL 正規化・比較 - システムマイグレーション");
@@ -182,22 +190,21 @@ public class SqlNormalizeApp {
         linkScrollPaneSync(beforeInputScroll, afterInputScroll);
         inputPanel.add(beforeInputScroll);
         inputPanel.add(afterInputScroll);
-        main.add(inputPanel, BorderLayout.NORTH);
 
-        // 正規化ボタン（直下に結果、余白なし）
+        // 正規化ボタン（入力エリア直下）
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 4));
         JButton normalizeBtn = new JButton("正規化して比較");
         setSqlCompareActionButtonSize(normalizeBtn);
         normalizeBtn.addActionListener(e -> onNormalize());
         buttonPanel.add(normalizeBtn);
 
-        DefaultTableModel beforeStmtModel = new DefaultTableModel(new Object[] { "#", "比較", "SQL" }, 0) {
+        DefaultTableModel beforeStmtModel = new DefaultTableModel(new Object[] { "#", "比較", "正規化SQL" }, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
                 return false;
             }
         };
-        DefaultTableModel afterStmtModel = new DefaultTableModel(new Object[] { "#", "比較", "SQL" }, 0) {
+        DefaultTableModel afterStmtModel = new DefaultTableModel(new Object[] { "#", "比較", "正規化SQL" }, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
                 return false;
@@ -249,11 +256,29 @@ public class SqlNormalizeApp {
         stmtListPanel.add(beforeGridScroll);
         stmtListPanel.add(afterGridScroll);
 
+        showDiffRowsOnlyCheck = new JCheckBox("差異行のみ表示");
+        showDiffRowsOnlyCheck.addActionListener(e -> {
+            int prevStmt = getSelectedStatementIndexFromEitherGrid();
+            fillStatementGrids();
+            restoreGridSelectionPreferringStatementIndex(prevStmt);
+            refreshFormattedPanesFromGridSelection();
+        });
+        JPanel gridFilterRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        gridFilterRow.add(showDiffRowsOnlyCheck);
+        JPanel gridBlock = new JPanel(new BorderLayout(4, 4));
+        gridBlock.add(gridFilterRow, BorderLayout.NORTH);
+        gridBlock.add(stmtListPanel, BorderLayout.CENTER);
+
         JPanel copyRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 4));
         JButton copyNormBtn = new JButton("正規化結果をコピー");
         setSqlCompareActionButtonSize(copyNormBtn);
         copyNormBtn.addActionListener(e -> copyNormalizedResultsToClipboard(frame));
         copyRow.add(copyNormBtn);
+
+        JPanel gridAndCopy = new JPanel(new BorderLayout(8, 8));
+        gridAndCopy.add(gridBlock, BorderLayout.CENTER);
+        gridAndCopy.add(copyRow, BorderLayout.SOUTH);
+        gridAndCopy.setMinimumSize(new Dimension(0, 140));
 
         JPanel resultPanel = new JPanel(new GridLayout(1, 2, 12, 0));
         beforeNormalizedArea = createReadOnlySqlPane();
@@ -263,25 +288,35 @@ public class SqlNormalizeApp {
         linkScrollPaneSync(beforeNormScroll, afterNormScroll);
         resultPanel.add(beforeNormScroll);
         resultPanel.add(afterNormScroll);
+        resultPanel.setMinimumSize(new Dimension(0, 100));
 
-        JPanel gridAndFormatted = new JPanel(new BorderLayout(8, 8));
-        gridAndFormatted.add(copyRow, BorderLayout.NORTH);
-        gridAndFormatted.add(resultPanel, BorderLayout.CENTER);
+        JSplitPane gridFormattedSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, gridAndCopy, resultPanel);
+        gridFormattedSplit.setResizeWeight(0.48);
+        gridFormattedSplit.setContinuousLayout(true);
+        gridFormattedSplit.setOneTouchExpandable(true);
+        gridFormattedSplit.setBorder(null);
 
         JPanel resultWrapper = new JPanel(new BorderLayout(8, 8));
-        resultWrapper.add(stmtListPanel, BorderLayout.NORTH);
-        resultWrapper.add(gridAndFormatted, BorderLayout.CENTER);
+        resultWrapper.add(gridFormattedSplit, BorderLayout.CENTER);
+        resultWrapper.setMinimumSize(new Dimension(0, 160));
 
-        JPanel centerPanel = new JPanel(new BorderLayout(0, 0));
-        centerPanel.add(buttonPanel, BorderLayout.NORTH);
-        centerPanel.add(resultWrapper, BorderLayout.CENTER);
-        main.add(centerPanel, BorderLayout.CENTER);
+        JPanel sqlInputAndNormalize = new JPanel(new BorderLayout(8, 8));
+        sqlInputAndNormalize.add(inputPanel, BorderLayout.CENTER);
+        sqlInputAndNormalize.add(buttonPanel, BorderLayout.SOUTH);
+        sqlInputAndNormalize.setMinimumSize(new Dimension(0, 120));
+
+        JSplitPane sqlCompareSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, sqlInputAndNormalize, resultWrapper);
+        sqlCompareSplit.setResizeWeight(0.38);
+        sqlCompareSplit.setContinuousLayout(true);
+        sqlCompareSplit.setOneTouchExpandable(true);
+        sqlCompareSplit.setBorder(null);
+        main.add(sqlCompareSplit, BorderLayout.CENTER);
 
         loadState();
 
         JTabbedPane tabs = new JTabbedPane();
         tabs.addTab("SQL比較", main);
-        tabs.addTab("H2接続・実行", new H2ConnectionPanel());
+        tabs.addTab("H2DB(P6Spy)", new H2ConnectionPanel());
 
         frame.setContentPane(tabs);
         frame.setSize(960, 760);
@@ -579,6 +614,230 @@ public class SqlNormalizeApp {
         return merged;
     }
 
+    private static final Pattern NUMERIC_LITERAL_HTML = Pattern.compile(
+            "(?<![A-Za-z0-9_])(\\d+(?:\\.\\d+)?)(?![A-Za-z0-9_])");
+
+    private static String escapeHtmlText(String s) {
+        if (s == null || s.isEmpty()) {
+            return "";
+        }
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+    }
+
+    /**
+     * Excel の HTML 貼り付けでは行頭の通常スペースが潰れやすいため、各行の先頭にあるスペース／タブを
+     * {@code &nbsp;} に置き換える（{@link #escapeHtmlText} 済みの文字列向け）。
+     */
+    private static String excelPreserveLeadingWhitespacePerLine(String escaped) {
+        if (escaped == null || escaped.isEmpty()) {
+            return escaped == null ? "" : escaped;
+        }
+        String[] lines = escaped.split("\n", -1);
+        StringBuilder sb = new StringBuilder(escaped.length() + lines.length * 16);
+        for (int i = 0; i < lines.length; i++) {
+            if (i > 0) {
+                sb.append('\n');
+            }
+            String line = lines[i];
+            int p = 0;
+            while (p < line.length()) {
+                char c = line.charAt(p);
+                if (c == ' ') {
+                    sb.append("&nbsp;");
+                    p++;
+                } else if (c == '\t') {
+                    sb.append("&nbsp;&nbsp;&nbsp;&nbsp;");
+                    p++;
+                } else {
+                    break;
+                }
+            }
+            sb.append(line, p, line.length());
+        }
+        return sb.toString();
+    }
+
+    private static String compareResultCellHtml(String label) {
+        if ("一致".equals(label)) {
+            return "<span style=\"color:#007800;font-weight:bold\">一致</span>";
+        }
+        if ("差異".equals(label)) {
+            return "<span style=\"color:#ff0000;font-weight:bold\">差異</span>";
+        }
+        return "<span>" + escapeHtmlText(label) + "</span>";
+    }
+
+    private static String htmlColorForStyle(byte style) {
+        switch (style) {
+            case 1:
+                return "#005ab4";
+            case 2:
+                return "#8000a0";
+            case 3:
+                return "#008c00";
+            case 4:
+                return "#bcbcbc";
+            case 5:
+                return "#ff0000";
+            default:
+                return "#000000";
+        }
+    }
+
+    /**
+     * 整形ペイン相当の着色（キーワード・リテラル・コメント・別名・行単位差分の赤）を反映した HTML。
+     * Excel 向け改行は {@code mso-data-placement:same-cell} 付き {@code br}。行頭インデントは
+     * {@link #excelPreserveLeadingWhitespacePerLine} で {@code &nbsp;} にし、{@code white-space:pre-wrap} と併用する。
+     */
+    private static String sqlToHtmlFragment(String sql, List<int[]> diffRedRanges) {
+        if (sql == null || sql.isEmpty()) {
+            return "";
+        }
+        final byte stDefault = 0;
+        final byte stKeyword = 1;
+        final byte stLiteral = 2;
+        final byte stComment = 3;
+        final byte stAlias = 4;
+        final byte stDiff = 5;
+
+        int n = sql.length();
+        byte[] sty = new byte[n];
+        List<int[]> stringRanges = findSingleQuotedStringRanges(sql);
+        List<int[]> blockCommentRanges = findBlockCommentRangesOutsideStrings(sql, stringRanges);
+
+        Matcher mkw = SqlNormalizer.keywordHighlightPattern().matcher(sql);
+        while (mkw.find()) {
+            if (!rangeOverlapsProtected(mkw.start(), mkw.end(), stringRanges, blockCommentRanges)) {
+                for (int p = mkw.start(); p < mkw.end(); p++) {
+                    sty[p] = stKeyword;
+                }
+            }
+        }
+        for (int[] sr : stringRanges) {
+            for (int p = sr[0]; p < sr[1]; p++) {
+                sty[p] = stLiteral;
+            }
+        }
+        Matcher mn = NUMERIC_LITERAL_HTML.matcher(sql);
+        while (mn.find()) {
+            if (!rangeOverlapsProtected(mn.start(1), mn.end(1), stringRanges, blockCommentRanges)) {
+                for (int p = mn.start(1); p < mn.end(1); p++) {
+                    sty[p] = stLiteral;
+                }
+            }
+        }
+        Matcher mq = TABLE_QUALIFIER_WITH_DOT.matcher(sql);
+        while (mq.find()) {
+            if (!rangeOverlapsProtected(mq.start(), mq.end(), stringRanges, blockCommentRanges)) {
+                for (int p = mq.start(1); p < mq.end(1); p++) {
+                    sty[p] = stAlias;
+                }
+            }
+        }
+        Matcher mf = FROM_TABLE_ALIAS.matcher(sql);
+        while (mf.find()) {
+            String aliasWord = mf.group(2);
+            if (NORMALIZED_TABLE_ALIAS_WORD.matcher(aliasWord).matches()
+                    && !rangeOverlapsProtected(mf.start(2), mf.end(2), stringRanges, blockCommentRanges)) {
+                for (int p = mf.start(2); p < mf.end(2); p++) {
+                    sty[p] = stAlias;
+                }
+            }
+        }
+        Matcher mj = JOIN_TABLE_ALIAS.matcher(sql);
+        while (mj.find()) {
+            String aliasWord = mj.group(2);
+            if (NORMALIZED_TABLE_ALIAS_WORD.matcher(aliasWord).matches()
+                    && !rangeOverlapsProtected(mj.start(2), mj.end(2), stringRanges, blockCommentRanges)) {
+                for (int p = mj.start(2); p < mj.end(2); p++) {
+                    sty[p] = stAlias;
+                }
+            }
+        }
+        for (int[] cr : blockCommentRanges) {
+            for (int p = cr[0]; p < cr[1]; p++) {
+                sty[p] = stComment;
+            }
+        }
+        if (diffRedRanges != null) {
+            for (int[] r : diffRedRanges) {
+                int start = r[0];
+                int end = r[1];
+                if (start < 0 || end <= start || start >= n) {
+                    continue;
+                }
+                end = Math.min(end, n);
+                for (int p = start; p < end; p++) {
+                    sty[p] = stDiff;
+                }
+            }
+        }
+
+        StringBuilder out = new StringBuilder(sql.length() * 3);
+        out.append("<span style=\"white-space:pre-wrap;font-family:Consolas,'Courier New',monospace;font-size:10pt\">");
+        int i = 0;
+        while (i < n) {
+            byte s = sty[i];
+            int j = i + 1;
+            while (j < n && sty[j] == s) {
+                j++;
+            }
+            String chunk = sql.substring(i, j);
+            String esc = escapeHtmlText(chunk).replace("\r\n", "\n").replace('\r', '\n');
+            String escExcel = excelPreserveLeadingWhitespacePerLine(esc)
+                    .replace("\n", "<br style=\"mso-data-placement:same-cell\" />");
+            if (s == stDefault) {
+                out.append(escExcel);
+            } else {
+                out.append("<span style=\"color:").append(htmlColorForStyle(s))
+                        .append(";white-space:pre-wrap\">").append(escExcel).append("</span>");
+            }
+            i = j;
+        }
+        out.append("</span>");
+        return out.toString();
+    }
+
+    /** Excel 貼り付け用: 正規化結果を HTML 表にし、整形ペインと同様の複行・着色・行差分を含める。 */
+    private String buildNormalizedResultsHtmlTable() {
+        StringBuilder sb = new StringBuilder(8192);
+        sb.append("<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\" ");
+        sb.append("style=\"border-collapse:collapse;border:1px solid #808080;");
+        sb.append("font-size:11pt;font-family:Segoe UI,sans-serif\">");
+        sb.append("<thead><tr style=\"background:#eaeaea\">");
+        sb.append("<th style=\"").append(EXCEL_HTML_CELL_BORDER).append("\">#</th>");
+        sb.append("<th style=\"").append(EXCEL_HTML_CELL_BORDER).append("\">比較結果</th>");
+        sb.append("<th style=\"").append(EXCEL_HTML_CELL_BORDER).append("\">移行前SQL</th>");
+        sb.append("<th style=\"").append(EXCEL_HTML_CELL_BORDER).append("\">移行後SQL</th>");
+        sb.append("</tr></thead><tbody>");
+        int n = Math.max(beforeNormStatements.size(), afterNormStatements.size());
+        for (int i = 0; i < n; i++) {
+            String beforeRaw = i < beforeNormStatements.size() ? beforeNormStatements.get(i) : "";
+            String afterRaw = i < afterNormStatements.size() ? afterNormStatements.get(i) : "";
+            String dispL = sqlForFormattedPane(normalizer.formatNormalizedSqlForDisplayPane(beforeRaw));
+            String dispR = sqlForFormattedPane(normalizer.formatNormalizedSqlForDisplayPane(afterRaw));
+            List<int[]> redL = computeDiffRedRanges(dispL, true, dispL, dispR);
+            List<int[]> redR = computeDiffRedRanges(dispR, false, dispL, dispR);
+            sb.append("<tr>");
+            sb.append("<td style=\"").append(EXCEL_HTML_CELL_BORDER)
+                    .append("vertical-align:top;text-align:center\">").append(i + 1).append("</td>");
+            sb.append("<td style=\"").append(EXCEL_HTML_CELL_BORDER)
+                    .append("vertical-align:top;text-align:center\">")
+                    .append(compareResultCellHtml(pairCompareLabel(i))).append("</td>");
+            sb.append("<td style=\"").append(EXCEL_HTML_CELL_BORDER).append("vertical-align:top;padding:4px\">")
+                    .append("<div style=\"mso-data-placement:same-cell;white-space:pre-wrap\">")
+                    .append(sqlToHtmlFragment(dispL, redL))
+                    .append("</div></td>");
+            sb.append("<td style=\"").append(EXCEL_HTML_CELL_BORDER).append("vertical-align:top;padding:4px\">")
+                    .append("<div style=\"mso-data-placement:same-cell;white-space:pre-wrap\">")
+                    .append(sqlToHtmlFragment(dispR, redR))
+                    .append("</div></td>");
+            sb.append("</tr>");
+        }
+        sb.append("</tbody></table>");
+        return sb.toString();
+    }
+
     /**
      * テキストエリアをタイトル付きボーダーとスクロールでラップする。
      *
@@ -699,12 +958,12 @@ public class SqlNormalizeApp {
 
         gridSelectionProgrammatic = true;
         try {
-            if (!beforeNormStatements.isEmpty()) {
+            if (beforeStmtGrid.getRowCount() > 0) {
                 beforeStmtGrid.setRowSelectionInterval(0, 0);
             } else {
                 beforeStmtGrid.clearSelection();
             }
-            if (!afterNormStatements.isEmpty()) {
+            if (afterStmtGrid.getRowCount() > 0) {
                 afterStmtGrid.setRowSelectionInterval(0, 0);
             } else {
                 afterStmtGrid.clearSelection();
@@ -717,10 +976,12 @@ public class SqlNormalizeApp {
     }
 
     /**
-     * 現在の正規化結果を TSV 形式でクリップボードにコピーする。
-     * 列は {@code #}・比較結果・移行前SQL・移行後SQL。SQL 列は {@link #sqlCollapseToOneLine} で引用符外の改行・インデントを除き 1 行にする（省略なし。グリッドの {@link #sqlGridPreview} とは異なる）。
-     * 移行前SQL 列のみ、非空かつ末尾が {@code ;} でなければ {@code ;} を付与する。
-     * タブ・改行・{@code "} を含むセルはダブルクォートで囲む（Excel 貼り付け向けに先頭に BOM）。
+     * 現在の正規化結果をクリップボードにコピーする。
+     * <ul>
+     *   <li><b>HTML（CF_HTML）</b>: Excel 貼り付け向け。列は {@code #}・比較結果・移行前SQL・移行後SQL。
+     *       SQL は整形ペイン相当の複行・インデント（{@code mso-data-placement:same-cell} 付き {@code br} と {@code pre-wrap}）、キーワード／リテラル等の色、行単位差分の赤字を反映。</li>
+     *   <li><b>テキスト（TSV）</b>: 従来どおり 1 行化したタブ区切り（移行前SQL 末尾 {@code ;}、BOM 付き）。他アプリ用。</li>
+     * </ul>
      */
     private void copyNormalizedResultsToClipboard(Component parent) {
         int n = Math.max(beforeNormStatements.size(), afterNormStatements.size());
@@ -731,10 +992,12 @@ public class SqlNormalizeApp {
                     JOptionPane.INFORMATION_MESSAGE);
             return;
         }
-        String text = buildNormalizedResultsTsvForClipboard();
-        Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
+        String plainTsv = buildNormalizedResultsTsvForClipboard();
+        String htmlTable = buildNormalizedResultsHtmlTable();
+        HtmlWindowsClipboard.setHtmlFragmentWithPlainText(htmlTable, plainTsv);
         JOptionPane.showMessageDialog(parent,
-                "クリップボードにコピーしました。",
+                "クリップボードにコピーしました。\nExcel ではセルを選んで貼り付け（Ctrl+V）。"
+                        + "SQL は 1 セル内に複行で入ります。見切れる場合は「ホーム」→「折り返して全体を表示する」をオンにしてください。",
                 "正規化結果をコピー",
                 JOptionPane.INFORMATION_MESSAGE);
     }
@@ -841,7 +1104,7 @@ public class SqlNormalizeApp {
     }
 
     /**
-     * 正規化グリッドの SQL 列用: {@link #sqlCollapseToOneLine} の結果を最大 240 文字で {@code …} 省略する。
+     * 正規化グリッドの正規化SQL 列用: {@link #sqlCollapseToOneLine} の結果を最大 240 文字で {@code …} 省略する。
      */
     private static String sqlGridPreview(String sql) {
         String oneLine = sqlCollapseToOneLine(sql);
@@ -869,18 +1132,119 @@ public class SqlNormalizeApp {
         return beforeNormStatements.get(index).equals(afterNormStatements.get(index)) ? "一致" : "差異";
     }
 
-    /** 移行前・移行後グリッドを、比較列付きで再構築する。 */
+    /** 移行前・移行後グリッドを、比較列付きで再構築する。チェック ON 時は比較が「差異」の文だけ行に載せる。 */
     private void fillStatementGrids() {
-        fillOneStatementGrid(beforeStmtGrid, beforeNormStatements);
-        fillOneStatementGrid(afterStmtGrid, afterNormStatements);
+        DefaultTableModel bm = (DefaultTableModel) beforeStmtGrid.getModel();
+        DefaultTableModel am = (DefaultTableModel) afterStmtGrid.getModel();
+        bm.setRowCount(0);
+        am.setRowCount(0);
+
+        if (showDiffRowsOnlyCheck != null && showDiffRowsOnlyCheck.isSelected()) {
+            List<Integer> diffIndices = new ArrayList<>();
+            int n = Math.max(beforeNormStatements.size(), afterNormStatements.size());
+            for (int i = 0; i < n; i++) {
+                if ("差異".equals(pairCompareLabel(i))) {
+                    diffIndices.add(i);
+                }
+            }
+            int k = diffIndices.size();
+            beforeGridStmtIndexMap = new int[k];
+            afterGridStmtIndexMap = new int[k];
+            for (int r = 0; r < k; r++) {
+                int si = diffIndices.get(r);
+                beforeGridStmtIndexMap[r] = si;
+                afterGridStmtIndexMap[r] = si;
+                bm.addRow(new Object[] {
+                        String.valueOf(si + 1),
+                        "差異",
+                        sqlGridPreview(beforeNormStatements.get(si))
+                });
+                am.addRow(new Object[] {
+                        String.valueOf(si + 1),
+                        "差異",
+                        sqlGridPreview(afterNormStatements.get(si))
+                });
+            }
+        } else {
+            int nb = beforeNormStatements.size();
+            beforeGridStmtIndexMap = new int[nb];
+            for (int i = 0; i < nb; i++) {
+                beforeGridStmtIndexMap[i] = i;
+                bm.addRow(new Object[] {
+                        String.valueOf(i + 1),
+                        pairCompareLabel(i),
+                        sqlGridPreview(beforeNormStatements.get(i))
+                });
+            }
+            int na = afterNormStatements.size();
+            afterGridStmtIndexMap = new int[na];
+            for (int j = 0; j < na; j++) {
+                afterGridStmtIndexMap[j] = j;
+                am.addRow(new Object[] {
+                        String.valueOf(j + 1),
+                        pairCompareLabel(j),
+                        sqlGridPreview(afterNormStatements.get(j))
+                });
+            }
+        }
     }
 
-    private void fillOneStatementGrid(JTable table, List<String> sideStatements) {
-        DefaultTableModel m = (DefaultTableModel) table.getModel();
-        m.setRowCount(0);
-        for (int i = 0; i < sideStatements.size(); i++) {
-            m.addRow(new Object[] { String.valueOf(i + 1), pairCompareLabel(i), sqlGridPreview(sideStatements.get(i)) });
+    /** 移行前グリッドの選択行に対応する正規化文インデックス。無効時は -1。 */
+    private int getSelectedStatementIndexFromBeforeGrid() {
+        int row = beforeStmtGrid.getSelectedRow();
+        if (row < 0 || row >= beforeGridStmtIndexMap.length) {
+            return -1;
         }
+        return beforeGridStmtIndexMap[row];
+    }
+
+    /** どちらかのグリッドの選択から正規化文インデックスを得る（移行前を優先）。 */
+    private int getSelectedStatementIndexFromEitherGrid() {
+        int fromBefore = getSelectedStatementIndexFromBeforeGrid();
+        if (fromBefore >= 0) {
+            return fromBefore;
+        }
+        int row = afterStmtGrid.getSelectedRow();
+        if (row < 0 || row >= afterGridStmtIndexMap.length) {
+            return -1;
+        }
+        return afterGridStmtIndexMap[row];
+    }
+
+    /** 指定した文インデックスの行を選ぶ。無ければ先頭、行が無ければ選択解除。 */
+    private void restoreGridSelectionPreferringStatementIndex(int statementIndex) {
+        gridSelectionProgrammatic = true;
+        try {
+            int row = findDisplayRowForStatementIndex(statementIndex);
+            if (row < 0 && beforeStmtGrid.getRowCount() > 0) {
+                row = 0;
+            }
+            if (row >= 0) {
+                beforeStmtGrid.setRowSelectionInterval(row, row);
+                if (row < afterStmtGrid.getRowCount()) {
+                    afterStmtGrid.setRowSelectionInterval(row, row);
+                } else {
+                    afterStmtGrid.clearSelection();
+                }
+            } else {
+                beforeStmtGrid.clearSelection();
+                afterStmtGrid.clearSelection();
+            }
+        } finally {
+            gridSelectionProgrammatic = false;
+        }
+    }
+
+    private int findDisplayRowForStatementIndex(int stmtIdx) {
+        if (stmtIdx < 0) {
+            return -1;
+        }
+        for (int r = 0; r < beforeGridStmtIndexMap.length; r++) {
+            if (beforeGridStmtIndexMap[r] == stmtIdx) {
+                return r;
+            }
+        }
+        return -1;
     }
 
     /** 「比較」列: 中央寄せ、一致は緑・差異は赤。 */
@@ -939,12 +1303,16 @@ public class SqlNormalizeApp {
     private void refreshFormattedPanesFromGridSelection() {
         int rb = beforeStmtGrid.getSelectedRow();
         int ra = afterStmtGrid.getSelectedRow();
-        String left = rb >= 0 && rb < beforeNormStatements.size() ? beforeNormStatements.get(rb) : "";
-        String right = ra >= 0 && ra < afterNormStatements.size() ? afterNormStatements.get(ra) : "";
-        List<int[]> redL = computeDiffRedRanges(left, true, left, right);
-        List<int[]> redR = computeDiffRedRanges(right, false, left, right);
-        setNormalizedSqlDisplay(beforeNormalizedArea, sqlForFormattedPane(left), redL);
-        setNormalizedSqlDisplay(afterNormalizedArea, sqlForFormattedPane(right), redR);
+        int ib = rb >= 0 && rb < beforeGridStmtIndexMap.length ? beforeGridStmtIndexMap[rb] : -1;
+        int ia = ra >= 0 && ra < afterGridStmtIndexMap.length ? afterGridStmtIndexMap[ra] : -1;
+        String left = ib >= 0 && ib < beforeNormStatements.size() ? beforeNormStatements.get(ib) : "";
+        String right = ia >= 0 && ia < afterNormStatements.size() ? afterNormStatements.get(ia) : "";
+        String dispLeft = sqlForFormattedPane(normalizer.formatNormalizedSqlForDisplayPane(left));
+        String dispRight = sqlForFormattedPane(normalizer.formatNormalizedSqlForDisplayPane(right));
+        List<int[]> redL = computeDiffRedRanges(dispLeft, true, dispLeft, dispRight);
+        List<int[]> redR = computeDiffRedRanges(dispRight, false, dispLeft, dispRight);
+        setNormalizedSqlDisplay(beforeNormalizedArea, dispLeft, redL);
+        setNormalizedSqlDisplay(afterNormalizedArea, dispRight, redR);
     }
 
     /**

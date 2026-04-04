@@ -84,7 +84,7 @@ public class H2ConnectionPanel extends JPanel {
         connPanel.add(new JLabel("URL:"));
         urlCombo = new JComboBox<>();
         urlCombo.setEditable(true);
-        urlCombo.setPreferredSize(new Dimension(420, urlCombo.getPreferredSize().height));
+        urlCombo.setPreferredSize(new Dimension(400, urlCombo.getPreferredSize().height));
         urlCombo.putClientProperty("JTextField.columns", 45);
         connPanel.add(urlCombo);
         connPanel.add(new JLabel("User:"));
@@ -126,7 +126,9 @@ public class H2ConnectionPanel extends JPanel {
         sqlArea = new JTextArea(6, 60);
         sqlArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
         sqlArea.setTabSize(4);
-        sqlPanel.add(new JScrollPane(sqlArea), BorderLayout.CENTER);
+        JScrollPane sqlScroll = new JScrollPane(sqlArea);
+        sqlScroll.setMinimumSize(new Dimension(0, 72));
+        sqlPanel.add(sqlScroll, BorderLayout.CENTER);
         executeBtn = new JButton("実行");
         executeBtn.setEnabled(false);
         executeBtn.addActionListener(e -> doExecute());
@@ -140,15 +142,27 @@ public class H2ConnectionPanel extends JPanel {
         resultTableModel = new DefaultTableModel();
         resultTable = new JTable(resultTableModel);
         resultTable.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        resultPanel.add(new JScrollPane(resultTable), BorderLayout.CENTER);
+        // 行数が多いと preferred 高さが膨らみ SQL 領域が潰れるのを防ぐ（スクロールで表示）
+        resultTable.setPreferredScrollableViewportSize(new Dimension(480, 160));
+        JScrollPane resultScroll = new JScrollPane(resultTable);
+        resultScroll.setMinimumSize(new Dimension(0, 64));
+        resultPanel.add(resultScroll, BorderLayout.CENTER);
         statusLabel = new JLabel(" ");
         resultPanel.add(statusLabel, BorderLayout.SOUTH);
 
-        JPanel centerContent = new JPanel(new BorderLayout(4, 4));
-        centerContent.add(txPanel, BorderLayout.NORTH);
-        centerContent.add(sqlPanel, BorderLayout.CENTER);
-        centerContent.add(resultPanel, BorderLayout.SOUTH);
-        add(centerContent, BorderLayout.CENTER);
+        JPanel topSplit = new JPanel(new BorderLayout(4, 4));
+        topSplit.add(txPanel, BorderLayout.NORTH);
+        topSplit.add(sqlPanel, BorderLayout.CENTER);
+        topSplit.setMinimumSize(new Dimension(0, 96));
+
+        resultPanel.setMinimumSize(new Dimension(0, 88));
+
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, topSplit, resultPanel);
+        split.setResizeWeight(0.42);
+        split.setContinuousLayout(true);
+        split.setOneTouchExpandable(true);
+        split.setBorder(null);
+        add(split, BorderLayout.CENTER);
 
         loadState();
     }
