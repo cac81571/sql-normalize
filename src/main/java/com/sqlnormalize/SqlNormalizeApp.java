@@ -41,7 +41,7 @@ import java.nio.file.StandardCopyOption;
 /**
  * 移行前・移行後SQLを貼り付けて正規化し、比較するSwingアプリケーションのメインクラス。
  * <p>
- * 移行前/移行後SQLの入力エリア（複数文は {@code ;} 区切り）、正規化ボタン、正規化済み文の一覧グリッド、正規化結果コピーボタン、整形詳細ペインを、縦スプリットで入力＋ボタン／（グリッド＋コピー／整形）のように配置する。
+ * 移行前/移行後SQLの入力エリア（複数文は改行区切り）、正規化ボタン、正規化グリッド（各枠内に空行追加・行削除）、その下に正規化結果コピーと差異行のみ表示、整形詳細ペインを縦スプリットで配置する。
  * 終了時に入力内容をファイルへ保存し、次回起動時に復元する。
  * </p>
  */
@@ -60,11 +60,11 @@ public class SqlNormalizeApp {
     private static final String SPY_PROPERTIES_FILE = "spy.properties";
 
     /** SQL 比較タブの「正規化して比較」「正規化結果をコピー」ボタンサイズ（幅×高さ）。 */
-    private static final Dimension SQL_COMPARE_ACTION_BUTTON_SIZE = new Dimension(130, 30);
+    private static final Dimension SQL_COMPARE_ACTION_BUTTON_SIZE = new Dimension(130, 25);
 
     /** SQL正規化処理を行うインスタンス。 */
     private final SqlNormalizer normalizer = new SqlNormalizer();
-    /** 移行前SQLの入力エリア（複数文は {@code ;} 区切り。単引用符内の {@code ;} は区切りにしない）。 */
+    /** 移行前SQLの入力エリア（複数文は改行区切り。単引用符内の改行では分割しない）。 */
     private JTextArea beforeSqlArea;
     /** 移行後SQLの入力エリア。 */
     private JTextArea afterSqlArea;
@@ -164,7 +164,7 @@ public class SqlNormalizeApp {
 
     /**
      * メインウィンドウを構築し、表示する。
-     * 縦スプリットの上段に移行前/移行後入力と正規化ボタン、下段をさらに縦スプリットし上に正規化グリッド・差異フィルタ・コピーボタン、下に整形ペインを配置する。
+     * 縦スプリットの上段に移行前/移行後入力と正規化ボタン、下段をさらに縦スプリットし上に正規化グリッド（各枠内に空行追加・行削除）、その下にコピーと差異行のみ、さらに下に整形ペインを配置する。
      */
     private void createAndShow() {
         JFrame frame = new JFrame("SQL 正規化・比較 - システムマイグレーション");
@@ -185,8 +185,8 @@ public class SqlNormalizeApp {
         JPanel inputPanel = new JPanel(new GridLayout(1, 2, 12, 0));
         beforeSqlArea = createSqlArea("移行前 SQL");
         afterSqlArea = createSqlArea("移行後 SQL");
-        JScrollPane beforeInputScroll = wrapWithScroll(beforeSqlArea, "移行前 SQL（; 区切りで複数可）");
-        JScrollPane afterInputScroll = wrapWithScroll(afterSqlArea, "移行後 SQL（; 区切りで複数可）");
+        JScrollPane beforeInputScroll = wrapWithScroll(beforeSqlArea, "移行前 SQL（改行区切りで複数可）");
+        JScrollPane afterInputScroll = wrapWithScroll(afterSqlArea, "移行後 SQL（改行区切りで複数可）");
         linkScrollPaneSync(beforeInputScroll, afterInputScroll);
         inputPanel.add(beforeInputScroll);
         inputPanel.add(afterInputScroll);
@@ -247,14 +247,19 @@ public class SqlNormalizeApp {
             }
         });
 
-        JPanel stmtListPanel = new JPanel(new GridLayout(1, 2, 12, 0));
-        JScrollPane beforeGridScroll = wrapWithScroll(beforeStmtGrid, "移行前（正規化）");
-        JScrollPane afterGridScroll = wrapWithScroll(afterStmtGrid, "移行後（正規化）");
-        beforeGridScroll.setPreferredSize(new Dimension(200, 220));
-        afterGridScroll.setPreferredSize(new Dimension(200, 220));
-        linkScrollPaneSync(beforeGridScroll, afterGridScroll);
-        stmtListPanel.add(beforeGridScroll);
-        stmtListPanel.add(afterGridScroll);
+        JButton beforeBlankBeforeBtn = new JButton("空行追加（前）");
+        JButton beforeBlankAfterBtn = new JButton("空行追加（後）");
+        beforeBlankBeforeBtn.addActionListener(e -> insertBlankNormRow(frame, true, true));
+        beforeBlankAfterBtn.addActionListener(e -> insertBlankNormRow(frame, true, false));
+        JButton beforeDeleteBtn = new JButton("行削除");
+        beforeDeleteBtn.addActionListener(e -> deleteSelectedNormRow(frame, true));
+
+        JButton afterBlankBeforeBtn = new JButton("空行追加（前）");
+        JButton afterBlankAfterBtn = new JButton("空行追加（後）");
+        afterBlankBeforeBtn.addActionListener(e -> insertBlankNormRow(frame, false, true));
+        afterBlankAfterBtn.addActionListener(e -> insertBlankNormRow(frame, false, false));
+        JButton afterDeleteBtn = new JButton("行削除");
+        afterDeleteBtn.addActionListener(e -> deleteSelectedNormRow(frame, false));
 
         showDiffRowsOnlyCheck = new JCheckBox("差異行のみ表示");
         showDiffRowsOnlyCheck.addActionListener(e -> {
@@ -262,22 +267,60 @@ public class SqlNormalizeApp {
             fillStatementGrids();
             restoreGridSelectionPreferringStatementIndex(prevStmt);
             refreshFormattedPanesFromGridSelection();
+            beforeStmtGrid.repaint();
+            afterStmtGrid.repaint();
         });
-        JPanel gridFilterRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
-        gridFilterRow.add(showDiffRowsOnlyCheck);
-        JPanel gridBlock = new JPanel(new BorderLayout(4, 4));
-        gridBlock.add(gridFilterRow, BorderLayout.NORTH);
-        gridBlock.add(stmtListPanel, BorderLayout.CENTER);
 
-        JPanel copyRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 4));
+        JScrollPane beforeGridScroll = new JScrollPane(beforeStmtGrid);
+        beforeGridScroll.setBorder(new EmptyBorder(4, 4, 4, 4));
+        JScrollPane afterGridScroll = new JScrollPane(afterStmtGrid);
+        afterGridScroll.setBorder(new EmptyBorder(4, 4, 4, 4));
+        beforeGridScroll.setPreferredSize(new Dimension(200, 220));
+        afterGridScroll.setPreferredSize(new Dimension(200, 220));
+        linkScrollPaneSync(beforeGridScroll, afterGridScroll);
+
+        JPanel beforeBtnRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 4));
+        beforeBtnRow.add(beforeBlankBeforeBtn);
+        beforeBtnRow.add(beforeBlankAfterBtn);
+        beforeBtnRow.add(beforeDeleteBtn);
+
+        JPanel afterBtnRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 4));
+        afterBtnRow.add(afterBlankBeforeBtn);
+        afterBtnRow.add(afterBlankAfterBtn);
+        afterBtnRow.add(afterDeleteBtn);
+
+        JPanel beforeNormTitled = new JPanel(new BorderLayout(4, 4));
+        beforeNormTitled.add(beforeGridScroll, BorderLayout.CENTER);
+        beforeNormTitled.add(beforeBtnRow, BorderLayout.SOUTH);
+        beforeNormTitled.setBorder(BorderFactory.createCompoundBorder(
+                new TitledBorder(BorderFactory.createLineBorder(Color.GRAY, 1), "移行前（正規化）", TitledBorder.LEFT, TitledBorder.TOP),
+                new EmptyBorder(4, 4, 4, 4)));
+
+        JPanel afterNormTitled = new JPanel(new BorderLayout(4, 4));
+        afterNormTitled.add(afterGridScroll, BorderLayout.CENTER);
+        afterNormTitled.add(afterBtnRow, BorderLayout.SOUTH);
+        afterNormTitled.setBorder(BorderFactory.createCompoundBorder(
+                new TitledBorder(BorderFactory.createLineBorder(Color.GRAY, 1), "移行後（正規化）", TitledBorder.LEFT, TitledBorder.TOP),
+                new EmptyBorder(4, 4, 4, 4)));
+
+        JPanel stmtListPanel = new JPanel(new GridLayout(1, 2, 12, 0));
+        stmtListPanel.add(beforeNormTitled);
+        stmtListPanel.add(afterNormTitled);
+
         JButton copyNormBtn = new JButton("正規化結果をコピー");
         setSqlCompareActionButtonSize(copyNormBtn);
         copyNormBtn.addActionListener(e -> copyNormalizedResultsToClipboard(frame));
-        copyRow.add(copyNormBtn);
+
+        JPanel copyNormRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 4));
+        copyNormRow.add(copyNormBtn);
+        copyNormRow.add(showDiffRowsOnlyCheck);
+
+        JPanel gridBlock = new JPanel(new BorderLayout(4, 4));
+        gridBlock.add(stmtListPanel, BorderLayout.CENTER);
+        gridBlock.add(copyNormRow, BorderLayout.SOUTH);
 
         JPanel gridAndCopy = new JPanel(new BorderLayout(8, 8));
         gridAndCopy.add(gridBlock, BorderLayout.CENTER);
-        gridAndCopy.add(copyRow, BorderLayout.SOUTH);
         gridAndCopy.setMinimumSize(new Dimension(0, 140));
 
         JPanel resultPanel = new JPanel(new GridLayout(1, 2, 12, 0));
@@ -853,14 +896,6 @@ public class SqlNormalizeApp {
         return scroll;
     }
 
-    private static JScrollPane wrapWithScroll(JTable table, String title) {
-        JScrollPane scroll = new JScrollPane(table);
-        scroll.setBorder(BorderFactory.createCompoundBorder(
-                new TitledBorder(BorderFactory.createLineBorder(Color.GRAY, 1), title, TitledBorder.LEFT, TitledBorder.TOP),
-                new EmptyBorder(4, 4, 4, 4)));
-        return scroll;
-    }
-
     /**
      * 2つの {@link JScrollPane} の縦・横スクロール位置を同期する（一方を動かすともう一方が追従）。
      */
@@ -935,7 +970,7 @@ public class SqlNormalizeApp {
 
     /**
      * 「正規化して比較」ボタン押下時の処理。
-     * 入力を {@code ;} で分割して各文を正規化し、一覧グリッドに載せる。先頭行を選択して整形ペインに表示する。
+     * 入力を改行で分割し、各行は引用符外で最後の {@code |} より後ろだけを SQL とみなし、空・{@code ;} のみの行はスキップして正規化し一覧グリッドに載せる。先頭行を選択して整形ペインに表示する。
      * 同じ番号の文同士の一致/差異をグリッドの「比較」列に表示する。
      */
     private void onNormalize() {
@@ -948,10 +983,18 @@ public class SqlNormalizeApp {
         beforeNormStatements.clear();
         afterNormStatements.clear();
         for (String p : partsBefore) {
-            beforeNormStatements.add(normalizer.normalize(p));
+            String q = SqlNormalization.extractSqlAfterLastUnquotedPipe(p);
+            if (SqlNormalization.isBlankOrSemicolonOnlySql(q)) {
+                continue;
+            }
+            beforeNormStatements.add(normalizer.normalize(q));
         }
         for (String p : partsAfter) {
-            afterNormStatements.add(normalizer.normalize(p));
+            String q = SqlNormalization.extractSqlAfterLastUnquotedPipe(p);
+            if (SqlNormalization.isBlankOrSemicolonOnlySql(q)) {
+                continue;
+            }
+            afterNormStatements.add(normalizer.normalize(q));
         }
 
         fillStatementGrids();
@@ -1239,12 +1282,116 @@ public class SqlNormalizeApp {
         if (stmtIdx < 0) {
             return -1;
         }
-        for (int r = 0; r < beforeGridStmtIndexMap.length; r++) {
-            if (beforeGridStmtIndexMap[r] == stmtIdx) {
+        return findDisplayRowForStatementIndexOnMap(stmtIdx, beforeGridStmtIndexMap);
+    }
+
+    private static int findDisplayRowForStatementIndexOnMap(int stmtIdx, int[] map) {
+        if (map == null || stmtIdx < 0) {
+            return -1;
+        }
+        for (int r = 0; r < map.length; r++) {
+            if (map[r] == stmtIdx) {
                 return r;
             }
         }
         return -1;
+    }
+
+    /**
+     * グリッドを再構築し「比較」列を再計算、選択を復帰、整形ペインを更新する（空行追加・行削除の直後に呼ぶ）。
+     *
+     * @param targetIsBeforeList     操作したリストが移行前なら {@code true}（表示行の解決に使用）
+     * @param statementIndexToSelect 選択したい文インデックス。リストが空のときは {@code -1}
+     */
+    private void refreshNormGridsAndComparisonUi(boolean targetIsBeforeList, int statementIndexToSelect) {
+        fillStatementGrids();
+        int dr;
+        if (statementIndexToSelect < 0) {
+            dr = -1;
+        } else {
+            dr = findDisplayRowForStatementIndexOnMap(statementIndexToSelect,
+                    targetIsBeforeList ? beforeGridStmtIndexMap : afterGridStmtIndexMap);
+            if (dr < 0) {
+                int[] m = targetIsBeforeList ? beforeGridStmtIndexMap : afterGridStmtIndexMap;
+                dr = m.length > 0 ? 0 : -1;
+            }
+        }
+        selectDisplayRowOnBothGridsIfPossible(dr);
+        refreshFormattedPanesFromGridSelection();
+        beforeStmtGrid.repaint();
+        afterStmtGrid.repaint();
+    }
+
+    /**
+     * 移行前または移行後の正規化リストに空文（{@code ""}）を挿入し、比較行のズレを手動で調整する。
+     *
+     * @param targetIsBeforeList {@code true} なら移前行、{@code false} なら移行後
+     * @param insertBefore       {@code true} なら選択行の文の前、{@code false} ならその後
+     */
+    private void insertBlankNormRow(Component parent, boolean targetIsBeforeList, boolean insertBefore) {
+        JTable grid = targetIsBeforeList ? beforeStmtGrid : afterStmtGrid;
+        int[] map = targetIsBeforeList ? beforeGridStmtIndexMap : afterGridStmtIndexMap;
+        int row = grid.getSelectedRow();
+        if (row < 0 || row >= map.length) {
+            JOptionPane.showMessageDialog(parent,
+                    targetIsBeforeList ? "移行前（正規化）で行を選択してください。" : "移行後（正規化）で行を選択してください。",
+                    "空行の追加",
+                    JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        int stmtIdx = map[row];
+        int insertAt = insertBefore ? stmtIdx : stmtIdx + 1;
+        List<String> list = targetIsBeforeList ? beforeNormStatements : afterNormStatements;
+        list.add(insertAt, "");
+        refreshNormGridsAndComparisonUi(targetIsBeforeList, insertAt);
+    }
+
+    /**
+     * 選択中の文を移行前または移行後の正規化リストから削除する。
+     */
+    private void deleteSelectedNormRow(Component parent, boolean targetIsBeforeList) {
+        JTable grid = targetIsBeforeList ? beforeStmtGrid : afterStmtGrid;
+        int[] map = targetIsBeforeList ? beforeGridStmtIndexMap : afterGridStmtIndexMap;
+        int row = grid.getSelectedRow();
+        if (row < 0 || row >= map.length) {
+            JOptionPane.showMessageDialog(parent,
+                    targetIsBeforeList ? "移行前（正規化）で削除する行を選択してください。"
+                            : "移行後（正規化）で削除する行を選択してください。",
+                    "行の削除",
+                    JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        int stmtIdx = map[row];
+        List<String> list = targetIsBeforeList ? beforeNormStatements : afterNormStatements;
+        if (stmtIdx < 0 || stmtIdx >= list.size()) {
+            return;
+        }
+        list.remove(stmtIdx);
+        int selectStmt = list.isEmpty() ? -1 : Math.min(stmtIdx, list.size() - 1);
+        refreshNormGridsAndComparisonUi(targetIsBeforeList, selectStmt);
+    }
+
+    private void selectDisplayRowOnBothGridsIfPossible(int displayRow) {
+        gridSelectionProgrammatic = true;
+        try {
+            if (displayRow < 0) {
+                beforeStmtGrid.clearSelection();
+                afterStmtGrid.clearSelection();
+                return;
+            }
+            if (displayRow < beforeStmtGrid.getRowCount()) {
+                beforeStmtGrid.setRowSelectionInterval(displayRow, displayRow);
+            } else {
+                beforeStmtGrid.clearSelection();
+            }
+            if (displayRow < afterStmtGrid.getRowCount()) {
+                afterStmtGrid.setRowSelectionInterval(displayRow, displayRow);
+            } else {
+                afterStmtGrid.clearSelection();
+            }
+        } finally {
+            gridSelectionProgrammatic = false;
+        }
     }
 
     /** 「比較」列: 中央寄せ、一致は緑・差異は赤。 */

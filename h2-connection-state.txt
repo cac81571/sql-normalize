@@ -1,5 +1,0 @@
-url=jdbc:p6spy:h2:tcp://localhost/~/test;DB_CLOSE_DELAY=-1
-user=sa
----
-jdbc:p6spy:h2:tcp://localhost/~/test;DB_CLOSE_DELAY=-1
-jdbc:p6spy:h2:mem:test;DB_CLOSE_DELAY=-1

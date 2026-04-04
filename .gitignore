@@ -1,2 +1,6 @@
 target/
 spy.log
+sql-normalize-state.txt
+cp.txt
+h2-connection-state.txt
+sql-normalize-state.txt
