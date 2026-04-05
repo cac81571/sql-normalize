@@ -24,6 +24,7 @@ import javax.swing.text.ViewFactory;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -41,7 +42,7 @@ import java.nio.file.StandardCopyOption;
 /**
  * 移行前・移行後SQLを貼り付けて正規化し、比較するSwingアプリケーションのメインクラス。
  * <p>
- * 移行前/移行後SQLの入力エリア（複数文は改行区切り）、正規化ボタン、正規化グリッド（各枠内に空行追加・行削除）、その下に正規化結果コピーと差異行のみ表示、整形詳細ペインを縦スプリットで配置する。
+ * 移行前/移行後SQLの入力エリア（複数文は改行区切り）、正規化ボタン、Needleman–Wunsch（置換コストはレーベンシュタイン距離固定）と GAP コストスライダー・「再比較」による文単位対応付け、正規化グリッド、その下に正規化結果コピーと差異行のみ表示、整形詳細ペインを縦スプリットで配置する。
  * 終了時に入力内容をファイルへ保存し、次回起動時に復元する。
  * </p>
  */
@@ -72,12 +73,21 @@ public class SqlNormalizeApp {
     private final List<String> beforeNormStatements = new ArrayList<>();
     /** 移行後: 正規化済み各文。 */
     private final List<String> afterNormStatements = new ArrayList<>();
-    /** 移行前: #・比較・正規化SQL 列のグリッド。 */
+    /** 移行前: #・比較・距離・正規化SQL 列のグリッド。 */
     private JTable beforeStmtGrid;
-    /** 移行後: #・比較・正規化SQL 列のグリッド。 */
+    /** 移行後: #・比較・距離・正規化SQL 列のグリッド。 */
     private JTable afterStmtGrid;
     /** 正規化グリッドで「差異」行だけ表示するフィルタ。 */
     private JCheckBox showDiffRowsOnlyCheck;
+    /** 文リストアライメントのギャップ（挿入・削除）コスト。 */
+    private JSlider alignmentGapSlider;
+    /** {@link #alignmentGapSlider} の現在値表示。 */
+    private JLabel alignmentGapValueLabel;
+    /**
+     * グリッド表示・コピーの基準となるアライメント行（Needleman–Wunsch 結果）。
+     * 「再比較」または「正規化して比較」で更新される。
+     */
+    private List<SqlListAlignment.AlignStep> gridBaseAlignmentSteps = Collections.emptyList();
     /** 移行前グリッドの表示行 → 正規化文インデックス（0 始まり）。 */
     private int[] beforeGridStmtIndexMap = new int[0];
     /** 移行後グリッドの表示行 → 正規化文インデックス。 */
@@ -164,7 +174,7 @@ public class SqlNormalizeApp {
 
     /**
      * メインウィンドウを構築し、表示する。
-     * 縦スプリットの上段に移行前/移行後入力と正規化ボタン、下段をさらに縦スプリットし上に正規化グリッド（各枠内に空行追加・行削除）、その下にコピーと差異行のみ、さらに下に整形ペインを配置する。
+     * 縦スプリットの上段に移行前/移行後入力と正規化ボタン、下段をさらに縦スプリットし上に正規化グリッド、その下にコピーと差異行のみ、さらに下に整形ペインを配置する。
      */
     private void createAndShow() {
         JFrame frame = new JFrame("SQL 正規化・比較 - システムマイグレーション");
@@ -197,14 +207,34 @@ public class SqlNormalizeApp {
         setSqlCompareActionButtonSize(normalizeBtn);
         normalizeBtn.addActionListener(e -> onNormalize());
         buttonPanel.add(normalizeBtn);
+        buttonPanel.add(new JSeparator(SwingConstants.VERTICAL));
+        String gapCostTip = "<html>Needleman–Wunsch 法における「空行」を入れるときのコスト。<br>"
+                + "小さい → すぐ空行にする（ズレやすい）<br>"
+                + "大きい → 無理やりマッチする</html>";
+        buttonPanel.add(new JLabel("GAPコスト"));
+        alignmentGapSlider = new JSlider(JSlider.HORIZONTAL, 1, 5000, 100);
+        alignmentGapSlider.setMajorTickSpacing(1000);
+        alignmentGapSlider.setMinorTickSpacing(200);
+        alignmentGapSlider.setPaintTicks(true);
+        alignmentGapSlider.setPreferredSize(new Dimension(220, 48));
+        alignmentGapSlider.setToolTipText(gapCostTip);
+        alignmentGapValueLabel = new JLabel(String.valueOf(alignmentGapSlider.getValue()));
+        alignmentGapValueLabel.setToolTipText(gapCostTip);
+        buttonPanel.add(alignmentGapSlider);
+        buttonPanel.add(alignmentGapValueLabel);
+        JButton realignBtn = new JButton("再比較");
+        setSqlCompareActionButtonSize(realignBtn);
+        realignBtn.setToolTipText("現在の GAP コストで Needleman–Wunsch を再実行し、グリッドの対応付けを更新します。");
+        realignBtn.addActionListener(e -> onRealignNeedlemanWunsch(frame));
+        buttonPanel.add(realignBtn);
 
-        DefaultTableModel beforeStmtModel = new DefaultTableModel(new Object[] { "#", "比較", "正規化SQL" }, 0) {
+        DefaultTableModel beforeStmtModel = new DefaultTableModel(new Object[] { "#", "比較", "距離", "正規化SQL" }, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
                 return false;
             }
         };
-        DefaultTableModel afterStmtModel = new DefaultTableModel(new Object[] { "#", "比較", "正規化SQL" }, 0) {
+        DefaultTableModel afterStmtModel = new DefaultTableModel(new Object[] { "#", "比較", "距離", "正規化SQL" }, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
                 return false;
@@ -215,6 +245,10 @@ public class SqlNormalizeApp {
         DefaultTableCellRenderer compareColRenderer = new CompareColumnRenderer();
         beforeStmtGrid.getColumnModel().getColumn(1).setCellRenderer(compareColRenderer);
         afterStmtGrid.getColumnModel().getColumn(1).setCellRenderer(compareColRenderer);
+        DefaultTableCellRenderer distanceColRenderer = new DefaultTableCellRenderer();
+        distanceColRenderer.setHorizontalAlignment(SwingConstants.RIGHT);
+        beforeStmtGrid.getColumnModel().getColumn(2).setCellRenderer(distanceColRenderer);
+        afterStmtGrid.getColumnModel().getColumn(2).setCellRenderer(distanceColRenderer);
         Font gridFont = new Font(Font.MONOSPACED, Font.PLAIN, 12);
         beforeStmtGrid.setFont(gridFont);
         afterStmtGrid.setFont(gridFont);
@@ -222,17 +256,21 @@ public class SqlNormalizeApp {
         afterStmtGrid.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         beforeStmtGrid.getTableHeader().setReorderingAllowed(false);
         afterStmtGrid.getTableHeader().setReorderingAllowed(false);
-        if (beforeStmtGrid.getColumnModel().getColumnCount() > 2) {
+        if (beforeStmtGrid.getColumnModel().getColumnCount() > 3) {
             beforeStmtGrid.getColumnModel().getColumn(0).setPreferredWidth(40);
             beforeStmtGrid.getColumnModel().getColumn(0).setMaxWidth(56);
             beforeStmtGrid.getColumnModel().getColumn(1).setPreferredWidth(56);
             beforeStmtGrid.getColumnModel().getColumn(1).setMaxWidth(72);
+            beforeStmtGrid.getColumnModel().getColumn(2).setPreferredWidth(52);
+            beforeStmtGrid.getColumnModel().getColumn(2).setMaxWidth(80);
         }
-        if (afterStmtGrid.getColumnModel().getColumnCount() > 2) {
+        if (afterStmtGrid.getColumnModel().getColumnCount() > 3) {
             afterStmtGrid.getColumnModel().getColumn(0).setPreferredWidth(40);
             afterStmtGrid.getColumnModel().getColumn(0).setMaxWidth(56);
             afterStmtGrid.getColumnModel().getColumn(1).setPreferredWidth(56);
             afterStmtGrid.getColumnModel().getColumn(1).setMaxWidth(72);
+            afterStmtGrid.getColumnModel().getColumn(2).setPreferredWidth(52);
+            afterStmtGrid.getColumnModel().getColumn(2).setMaxWidth(80);
         }
         beforeStmtGrid.getSelectionModel().addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting() && !gridSelectionProgrammatic) {
@@ -247,20 +285,6 @@ public class SqlNormalizeApp {
             }
         });
 
-        JButton beforeBlankBeforeBtn = new JButton("空行追加（前）");
-        JButton beforeBlankAfterBtn = new JButton("空行追加（後）");
-        beforeBlankBeforeBtn.addActionListener(e -> insertBlankNormRow(frame, true, true));
-        beforeBlankAfterBtn.addActionListener(e -> insertBlankNormRow(frame, true, false));
-        JButton beforeDeleteBtn = new JButton("行削除");
-        beforeDeleteBtn.addActionListener(e -> deleteSelectedNormRow(frame, true));
-
-        JButton afterBlankBeforeBtn = new JButton("空行追加（前）");
-        JButton afterBlankAfterBtn = new JButton("空行追加（後）");
-        afterBlankBeforeBtn.addActionListener(e -> insertBlankNormRow(frame, false, true));
-        afterBlankAfterBtn.addActionListener(e -> insertBlankNormRow(frame, false, false));
-        JButton afterDeleteBtn = new JButton("行削除");
-        afterDeleteBtn.addActionListener(e -> deleteSelectedNormRow(frame, false));
-
         showDiffRowsOnlyCheck = new JCheckBox("差異行のみ表示");
         showDiffRowsOnlyCheck.addActionListener(e -> {
             int prevStmt = getSelectedStatementIndexFromEitherGrid();
@@ -271,6 +295,9 @@ public class SqlNormalizeApp {
             afterStmtGrid.repaint();
         });
 
+        alignmentGapSlider.addChangeListener(e ->
+                alignmentGapValueLabel.setText(String.valueOf(alignmentGapSlider.getValue())));
+
         JScrollPane beforeGridScroll = new JScrollPane(beforeStmtGrid);
         beforeGridScroll.setBorder(new EmptyBorder(4, 4, 4, 4));
         JScrollPane afterGridScroll = new JScrollPane(afterStmtGrid);
@@ -279,26 +306,14 @@ public class SqlNormalizeApp {
         afterGridScroll.setPreferredSize(new Dimension(200, 220));
         linkScrollPaneSync(beforeGridScroll, afterGridScroll);
 
-        JPanel beforeBtnRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 4));
-        beforeBtnRow.add(beforeBlankBeforeBtn);
-        beforeBtnRow.add(beforeBlankAfterBtn);
-        beforeBtnRow.add(beforeDeleteBtn);
-
-        JPanel afterBtnRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 4));
-        afterBtnRow.add(afterBlankBeforeBtn);
-        afterBtnRow.add(afterBlankAfterBtn);
-        afterBtnRow.add(afterDeleteBtn);
-
         JPanel beforeNormTitled = new JPanel(new BorderLayout(4, 4));
         beforeNormTitled.add(beforeGridScroll, BorderLayout.CENTER);
-        beforeNormTitled.add(beforeBtnRow, BorderLayout.SOUTH);
         beforeNormTitled.setBorder(BorderFactory.createCompoundBorder(
                 new TitledBorder(BorderFactory.createLineBorder(Color.GRAY, 1), "移行前（正規化）", TitledBorder.LEFT, TitledBorder.TOP),
                 new EmptyBorder(4, 4, 4, 4)));
 
         JPanel afterNormTitled = new JPanel(new BorderLayout(4, 4));
         afterNormTitled.add(afterGridScroll, BorderLayout.CENTER);
-        afterNormTitled.add(afterBtnRow, BorderLayout.SOUTH);
         afterNormTitled.setBorder(BorderFactory.createCompoundBorder(
                 new TitledBorder(BorderFactory.createLineBorder(Color.GRAY, 1), "移行後（正規化）", TitledBorder.LEFT, TitledBorder.TOP),
                 new EmptyBorder(4, 4, 4, 4)));
@@ -850,23 +865,28 @@ public class SqlNormalizeApp {
         sb.append("<thead><tr style=\"background:#eaeaea\">");
         sb.append("<th style=\"").append(EXCEL_HTML_CELL_BORDER).append("\">#</th>");
         sb.append("<th style=\"").append(EXCEL_HTML_CELL_BORDER).append("\">比較結果</th>");
+        sb.append("<th style=\"").append(EXCEL_HTML_CELL_BORDER).append("\">距離</th>");
         sb.append("<th style=\"").append(EXCEL_HTML_CELL_BORDER).append("\">移行前SQL</th>");
         sb.append("<th style=\"").append(EXCEL_HTML_CELL_BORDER).append("\">移行後SQL</th>");
         sb.append("</tr></thead><tbody>");
-        int n = Math.max(beforeNormStatements.size(), afterNormStatements.size());
-        for (int i = 0; i < n; i++) {
-            String beforeRaw = i < beforeNormStatements.size() ? beforeNormStatements.get(i) : "";
-            String afterRaw = i < afterNormStatements.size() ? afterNormStatements.get(i) : "";
+        List<SqlListAlignment.AlignStep> steps = alignmentStepsMatchingCurrentView();
+        for (int r = 0; r < steps.size(); r++) {
+            SqlListAlignment.AlignStep st = steps.get(r);
+            String beforeRaw = st.beforeIndex >= 0 ? beforeNormStatements.get(st.beforeIndex) : "";
+            String afterRaw = st.afterIndex >= 0 ? afterNormStatements.get(st.afterIndex) : "";
             String dispL = sqlForFormattedPane(normalizer.formatNormalizedSqlForDisplayPane(beforeRaw));
             String dispR = sqlForFormattedPane(normalizer.formatNormalizedSqlForDisplayPane(afterRaw));
             List<int[]> redL = computeDiffRedRanges(dispL, true, dispL, dispR);
             List<int[]> redR = computeDiffRedRanges(dispR, false, dispL, dispR);
             sb.append("<tr>");
             sb.append("<td style=\"").append(EXCEL_HTML_CELL_BORDER)
-                    .append("vertical-align:top;text-align:center\">").append(i + 1).append("</td>");
+                    .append("vertical-align:top;text-align:center\">").append(r + 1).append("</td>");
             sb.append("<td style=\"").append(EXCEL_HTML_CELL_BORDER)
                     .append("vertical-align:top;text-align:center\">")
-                    .append(compareResultCellHtml(pairCompareLabel(i))).append("</td>");
+                    .append(compareResultCellHtml(pairCompareLabel(st.beforeIndex, st.afterIndex))).append("</td>");
+            sb.append("<td style=\"").append(EXCEL_HTML_CELL_BORDER)
+                    .append("vertical-align:top;text-align:right\">")
+                    .append(escapeHtmlText(pairLevenshteinDistanceCell(st.beforeIndex, st.afterIndex))).append("</td>");
             sb.append("<td style=\"").append(EXCEL_HTML_CELL_BORDER).append("vertical-align:top;padding:4px\">")
                     .append("<div style=\"mso-data-placement:same-cell;white-space:pre-wrap\">")
                     .append(sqlToHtmlFragment(dispL, redL))
@@ -971,7 +991,7 @@ public class SqlNormalizeApp {
     /**
      * 「正規化して比較」ボタン押下時の処理。
      * 入力を改行で分割し、各行は引用符外で最後の {@code |} より後ろだけを SQL とみなし、空・{@code ;} のみの行はスキップして正規化し一覧グリッドに載せる。先頭行を選択して整形ペインに表示する。
-     * 同じ番号の文同士の一致/差異をグリッドの「比較」列に表示する。
+     * Needleman–Wunsch で文同士を対応付けたうえで、各行の「比較」列に一致/差異を表示する。
      */
     private void onNormalize() {
         String before = beforeSqlArea.getText();
@@ -997,6 +1017,7 @@ public class SqlNormalizeApp {
             afterNormStatements.add(normalizer.normalize(q));
         }
 
+        gridBaseAlignmentSteps = new ArrayList<>(computeNeedlemanWunschSteps());
         fillStatementGrids();
 
         gridSelectionProgrammatic = true;
@@ -1019,16 +1040,35 @@ public class SqlNormalizeApp {
     }
 
     /**
+     * GAP コストスライダーの値で Needleman–Wunsch を再実行し、グリッド対応付けを更新する。
+     */
+    private void onRealignNeedlemanWunsch(Component parent) {
+        if (beforeNormStatements.isEmpty() && afterNormStatements.isEmpty()) {
+            JOptionPane.showMessageDialog(parent,
+                    "正規化結果がありません。「正規化して比較」を先に実行してください。",
+                    "再比較",
+                    JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        int prevStmt = getSelectedStatementIndexFromEitherGrid();
+        gridBaseAlignmentSteps = new ArrayList<>(computeNeedlemanWunschSteps());
+        fillStatementGrids();
+        restoreGridSelectionPreferringStatementIndex(prevStmt);
+        refreshFormattedPanesFromGridSelection();
+        beforeStmtGrid.repaint();
+        afterStmtGrid.repaint();
+    }
+
+    /**
      * 現在の正規化結果をクリップボードにコピーする。
      * <ul>
-     *   <li><b>HTML（CF_HTML）</b>: Excel 貼り付け向け。列は {@code #}・比較結果・移行前SQL・移行後SQL。
+     *   <li><b>HTML（CF_HTML）</b>: Excel 貼り付け向け。列は {@code #}・比較結果・距離・移行前SQL・移行後SQL。
      *       SQL は整形ペイン相当の複行・インデント（{@code mso-data-placement:same-cell} 付き {@code br} と {@code pre-wrap}）、キーワード／リテラル等の色、行単位差分の赤字を反映。</li>
      *   <li><b>テキスト（TSV）</b>: 従来どおり 1 行化したタブ区切り（移行前SQL 末尾 {@code ;}、BOM 付き）。他アプリ用。</li>
      * </ul>
      */
     private void copyNormalizedResultsToClipboard(Component parent) {
-        int n = Math.max(beforeNormStatements.size(), afterNormStatements.size());
-        if (n == 0) {
+        if (beforeNormStatements.isEmpty() && afterNormStatements.isEmpty()) {
             JOptionPane.showMessageDialog(parent,
                     "コピーする正規化結果がありません。「正規化して比較」を先に実行してください。",
                     "正規化結果をコピー",
@@ -1046,14 +1086,16 @@ public class SqlNormalizeApp {
     }
 
     private String buildNormalizedResultsTsvForClipboard() {
-        int n = Math.max(beforeNormStatements.size(), afterNormStatements.size());
+        List<SqlListAlignment.AlignStep> steps = alignmentStepsMatchingCurrentView();
         StringBuilder sb = new StringBuilder();
         sb.append('\uFEFF');
-        sb.append(tsvRow("#", "比較結果", "移行前SQL", "移行後SQL")).append('\n');
-        for (int i = 0; i < n; i++) {
-            String before = i < beforeNormStatements.size() ? beforeNormStatements.get(i) : "";
-            String after = i < afterNormStatements.size() ? afterNormStatements.get(i) : "";
-            sb.append(tsvRow(String.valueOf(i + 1), pairCompareLabel(i),
+        sb.append(tsvRow("#", "比較結果", "距離", "移行前SQL", "移行後SQL")).append('\n');
+        for (int r = 0; r < steps.size(); r++) {
+            SqlListAlignment.AlignStep st = steps.get(r);
+            String before = st.beforeIndex >= 0 ? beforeNormStatements.get(st.beforeIndex) : "";
+            String after = st.afterIndex >= 0 ? afterNormStatements.get(st.afterIndex) : "";
+            sb.append(tsvRow(String.valueOf(r + 1), pairCompareLabel(st.beforeIndex, st.afterIndex),
+                            pairLevenshteinDistanceCell(st.beforeIndex, st.afterIndex),
                             sqlClipboardBeforeColumn(before), sqlCollapseToOneLine(after)))
                     .append('\n');
         }
@@ -1164,71 +1206,98 @@ public class SqlNormalizeApp {
         }
     }
 
-    /**
-     * 同じ番号（インデックス）の移行前後の正規化SQLを比較した結果。
-     * 片方にしか行が無いときは {@code —}。
-     */
-    private String pairCompareLabel(int index) {
-        if (index < 0 || index >= beforeNormStatements.size() || index >= afterNormStatements.size()) {
-            return "—";
+    private int getAlignmentGapPenalty() {
+        if (alignmentGapSlider != null) {
+            return Math.max(1, alignmentGapSlider.getValue());
         }
-        return beforeNormStatements.get(index).equals(afterNormStatements.get(index)) ? "一致" : "差異";
+        return 100;
     }
 
-    /** 移行前・移行後グリッドを、比較列付きで再構築する。チェック ON 時は比較が「差異」の文だけ行に載せる。 */
+    private List<SqlListAlignment.AlignStep> computeNeedlemanWunschSteps() {
+        return SqlListAlignment.needlemanWunsch(beforeNormStatements, afterNormStatements,
+                getAlignmentGapPenalty(), SqlListAlignment.SubstitutionCostMode.LEVENSHTEIN);
+    }
+
+    /**
+     * {@link #gridBaseAlignmentSteps} を元に、差異行のみ表示が ON のときはそのサブ列を返す（グリッド・コピー共通）。
+     */
+    private List<SqlListAlignment.AlignStep> alignmentStepsMatchingCurrentView() {
+        List<SqlListAlignment.AlignStep> steps = gridBaseAlignmentSteps;
+        if (steps == null) {
+            steps = Collections.emptyList();
+        }
+        if (showDiffRowsOnlyCheck != null && showDiffRowsOnlyCheck.isSelected()) {
+            List<SqlListAlignment.AlignStep> diffOnly = new ArrayList<>();
+            for (SqlListAlignment.AlignStep st : steps) {
+                if ("差異".equals(pairCompareLabel(st.beforeIndex, st.afterIndex))) {
+                    diffOnly.add(st);
+                }
+            }
+            return diffOnly;
+        }
+        return steps;
+    }
+
+    /**
+     * アライメント上の 1 行について比較ラベルを返す。片側ギャップは {@code —}、両方に文があれば一致/差異。
+     */
+    private String pairCompareLabel(int beforeIdx, int afterIdx) {
+        if (beforeIdx < 0 || afterIdx < 0) {
+            return "—";
+        }
+        if (beforeIdx >= beforeNormStatements.size() || afterIdx >= afterNormStatements.size()) {
+            return "—";
+        }
+        return beforeNormStatements.get(beforeIdx).equals(afterNormStatements.get(afterIdx)) ? "一致" : "差異";
+    }
+
+    /**
+     * 対応付けられた 2 文のレーベンシュタイン距離を表示用セル文字列にする。片側ギャップは {@code —}。
+     */
+    private String pairLevenshteinDistanceCell(int beforeIdx, int afterIdx) {
+        if (beforeIdx < 0 || afterIdx < 0) {
+            return "—";
+        }
+        if (beforeIdx >= beforeNormStatements.size() || afterIdx >= afterNormStatements.size()) {
+            return "—";
+        }
+        int d = SqlListAlignment.levenshteinDistance(
+                beforeNormStatements.get(beforeIdx), afterNormStatements.get(afterIdx));
+        return String.valueOf(d);
+    }
+
+    /**
+     * 移行前・移行後グリッドを {@link #gridBaseAlignmentSteps} に沿って再構築する。
+     * チェック ON 時は「差異」行のみ。
+     */
     private void fillStatementGrids() {
         DefaultTableModel bm = (DefaultTableModel) beforeStmtGrid.getModel();
         DefaultTableModel am = (DefaultTableModel) afterStmtGrid.getModel();
         bm.setRowCount(0);
         am.setRowCount(0);
 
-        if (showDiffRowsOnlyCheck != null && showDiffRowsOnlyCheck.isSelected()) {
-            List<Integer> diffIndices = new ArrayList<>();
-            int n = Math.max(beforeNormStatements.size(), afterNormStatements.size());
-            for (int i = 0; i < n; i++) {
-                if ("差異".equals(pairCompareLabel(i))) {
-                    diffIndices.add(i);
-                }
-            }
-            int k = diffIndices.size();
-            beforeGridStmtIndexMap = new int[k];
-            afterGridStmtIndexMap = new int[k];
-            for (int r = 0; r < k; r++) {
-                int si = diffIndices.get(r);
-                beforeGridStmtIndexMap[r] = si;
-                afterGridStmtIndexMap[r] = si;
-                bm.addRow(new Object[] {
-                        String.valueOf(si + 1),
-                        "差異",
-                        sqlGridPreview(beforeNormStatements.get(si))
-                });
-                am.addRow(new Object[] {
-                        String.valueOf(si + 1),
-                        "差異",
-                        sqlGridPreview(afterNormStatements.get(si))
-                });
-            }
-        } else {
-            int nb = beforeNormStatements.size();
-            beforeGridStmtIndexMap = new int[nb];
-            for (int i = 0; i < nb; i++) {
-                beforeGridStmtIndexMap[i] = i;
-                bm.addRow(new Object[] {
-                        String.valueOf(i + 1),
-                        pairCompareLabel(i),
-                        sqlGridPreview(beforeNormStatements.get(i))
-                });
-            }
-            int na = afterNormStatements.size();
-            afterGridStmtIndexMap = new int[na];
-            for (int j = 0; j < na; j++) {
-                afterGridStmtIndexMap[j] = j;
-                am.addRow(new Object[] {
-                        String.valueOf(j + 1),
-                        pairCompareLabel(j),
-                        sqlGridPreview(afterNormStatements.get(j))
-                });
-            }
+        List<SqlListAlignment.AlignStep> steps = alignmentStepsMatchingCurrentView();
+        int l = steps.size();
+        beforeGridStmtIndexMap = new int[l];
+        afterGridStmtIndexMap = new int[l];
+        for (int r = 0; r < l; r++) {
+            SqlListAlignment.AlignStep st = steps.get(r);
+            beforeGridStmtIndexMap[r] = st.beforeIndex;
+            afterGridStmtIndexMap[r] = st.afterIndex;
+            String cmp = pairCompareLabel(st.beforeIndex, st.afterIndex);
+            String dist = pairLevenshteinDistanceCell(st.beforeIndex, st.afterIndex);
+            bm.addRow(new Object[] {
+                    st.beforeIndex >= 0 ? String.valueOf(st.beforeIndex + 1) : "—",
+                    cmp,
+                    dist,
+                    st.beforeIndex >= 0 ? sqlGridPreview(beforeNormStatements.get(st.beforeIndex)) : ""
+            });
+            am.addRow(new Object[] {
+                    st.afterIndex >= 0 ? String.valueOf(st.afterIndex + 1) : "—",
+                    cmp,
+                    dist,
+                    st.afterIndex >= 0 ? sqlGridPreview(afterNormStatements.get(st.afterIndex)) : ""
+            });
         }
     }
 
@@ -1295,103 +1364,6 @@ public class SqlNormalizeApp {
             }
         }
         return -1;
-    }
-
-    /**
-     * グリッドを再構築し「比較」列を再計算、選択を復帰、整形ペインを更新する（空行追加・行削除の直後に呼ぶ）。
-     *
-     * @param targetIsBeforeList     操作したリストが移行前なら {@code true}（表示行の解決に使用）
-     * @param statementIndexToSelect 選択したい文インデックス。リストが空のときは {@code -1}
-     */
-    private void refreshNormGridsAndComparisonUi(boolean targetIsBeforeList, int statementIndexToSelect) {
-        fillStatementGrids();
-        int dr;
-        if (statementIndexToSelect < 0) {
-            dr = -1;
-        } else {
-            dr = findDisplayRowForStatementIndexOnMap(statementIndexToSelect,
-                    targetIsBeforeList ? beforeGridStmtIndexMap : afterGridStmtIndexMap);
-            if (dr < 0) {
-                int[] m = targetIsBeforeList ? beforeGridStmtIndexMap : afterGridStmtIndexMap;
-                dr = m.length > 0 ? 0 : -1;
-            }
-        }
-        selectDisplayRowOnBothGridsIfPossible(dr);
-        refreshFormattedPanesFromGridSelection();
-        beforeStmtGrid.repaint();
-        afterStmtGrid.repaint();
-    }
-
-    /**
-     * 移行前または移行後の正規化リストに空文（{@code ""}）を挿入し、比較行のズレを手動で調整する。
-     *
-     * @param targetIsBeforeList {@code true} なら移前行、{@code false} なら移行後
-     * @param insertBefore       {@code true} なら選択行の文の前、{@code false} ならその後
-     */
-    private void insertBlankNormRow(Component parent, boolean targetIsBeforeList, boolean insertBefore) {
-        JTable grid = targetIsBeforeList ? beforeStmtGrid : afterStmtGrid;
-        int[] map = targetIsBeforeList ? beforeGridStmtIndexMap : afterGridStmtIndexMap;
-        int row = grid.getSelectedRow();
-        if (row < 0 || row >= map.length) {
-            JOptionPane.showMessageDialog(parent,
-                    targetIsBeforeList ? "移行前（正規化）で行を選択してください。" : "移行後（正規化）で行を選択してください。",
-                    "空行の追加",
-                    JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        int stmtIdx = map[row];
-        int insertAt = insertBefore ? stmtIdx : stmtIdx + 1;
-        List<String> list = targetIsBeforeList ? beforeNormStatements : afterNormStatements;
-        list.add(insertAt, "");
-        refreshNormGridsAndComparisonUi(targetIsBeforeList, insertAt);
-    }
-
-    /**
-     * 選択中の文を移行前または移行後の正規化リストから削除する。
-     */
-    private void deleteSelectedNormRow(Component parent, boolean targetIsBeforeList) {
-        JTable grid = targetIsBeforeList ? beforeStmtGrid : afterStmtGrid;
-        int[] map = targetIsBeforeList ? beforeGridStmtIndexMap : afterGridStmtIndexMap;
-        int row = grid.getSelectedRow();
-        if (row < 0 || row >= map.length) {
-            JOptionPane.showMessageDialog(parent,
-                    targetIsBeforeList ? "移行前（正規化）で削除する行を選択してください。"
-                            : "移行後（正規化）で削除する行を選択してください。",
-                    "行の削除",
-                    JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-        int stmtIdx = map[row];
-        List<String> list = targetIsBeforeList ? beforeNormStatements : afterNormStatements;
-        if (stmtIdx < 0 || stmtIdx >= list.size()) {
-            return;
-        }
-        list.remove(stmtIdx);
-        int selectStmt = list.isEmpty() ? -1 : Math.min(stmtIdx, list.size() - 1);
-        refreshNormGridsAndComparisonUi(targetIsBeforeList, selectStmt);
-    }
-
-    private void selectDisplayRowOnBothGridsIfPossible(int displayRow) {
-        gridSelectionProgrammatic = true;
-        try {
-            if (displayRow < 0) {
-                beforeStmtGrid.clearSelection();
-                afterStmtGrid.clearSelection();
-                return;
-            }
-            if (displayRow < beforeStmtGrid.getRowCount()) {
-                beforeStmtGrid.setRowSelectionInterval(displayRow, displayRow);
-            } else {
-                beforeStmtGrid.clearSelection();
-            }
-            if (displayRow < afterStmtGrid.getRowCount()) {
-                afterStmtGrid.setRowSelectionInterval(displayRow, displayRow);
-            } else {
-                afterStmtGrid.clearSelection();
-            }
-        } finally {
-            gridSelectionProgrammatic = false;
-        }
     }
 
     /** 「比較」列: 中央寄せ、一致は緑・差異は赤。 */
