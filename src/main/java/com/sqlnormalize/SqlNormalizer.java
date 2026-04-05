@@ -107,6 +107,7 @@ public class SqlNormalizer {
      * 整形ペイン（および Excel 用 HTML 表の SQL セル）表示用。
      * 既に正規化済みの 1 文を再パースし、SELECT / INSERT / UPDATE について列リスト・{@code VALUES}・{@code SET} を
      * 行頭カンマ＋改行＋インデントの複行にしたうえでキーワード大文字化・カンマ前空白除去を適用する。
+     * {@code DELETE} は {@link SqlDeleteFormatter#formatDelete} による複行整形を適用する。
      * {@code INSERT} で列リストと式の個数が一致するときは {@code VALUES} 各式の直後に列名のブロックコメントを付ける。
      * 上記以外の文種、またはパースに失敗した場合は {@code normalizedSql} をそのまま返す。
      *
@@ -126,6 +127,8 @@ public class SqlNormalizer {
                 formatted = SqlInsertFormatter.formatInsert((Insert) stmt, true, true);
             } else if (stmt instanceof Update) {
                 formatted = SqlUpdateFormatter.formatUpdate((Update) stmt, true);
+            } else if (stmt instanceof Delete) {
+                formatted = SqlDeleteFormatter.formatDelete((Delete) stmt);
             } else {
                 return normalizedSql;
             }
