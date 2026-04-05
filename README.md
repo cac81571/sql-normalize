@@ -1,115 +1,115 @@
-# SQL 正規化・比較ツール（システムマイグレーション用）
+# SQL normalization and comparison tool (for system migration)
 
-移行前と移行後で発行されるSQL文の**エイリアス差異を吸収**し、正規化したうえで比較できる Swing アプリです。
+A Swing application that **absorbs alias differences** between pre- and post-migration SQL, normalizes statements, and compares them.
 
-## 技術要素
+## Stack
 
 - **Java 11**
-- **JSqlParser**（SQL パース・AST 操作）
+- **JSqlParser** (SQL parsing and AST manipulation)
 - **Maven**
-- **Swing**（GUI）
-- **FlatLaf**（Light テーマ）
-- **H2**（JDBC 接続・SQL 実行）
-- **P6Spy**（発行 SQL のログ出力 → `sqy.log`）
+- **Swing** (GUI)
+- **FlatLaf** (light theme)
+- **H2** (JDBC connection and SQL execution)
+- **P6Spy** (logs executed SQL → `sqy.log`)
 
-## 機能
+## Features
 
-- **移行前 SQL** / **移行後 SQL** をテキストエリアに貼り付け（**複数文は改行で区切る**。`'` で囲んだ文字列内の改行では分割しない）。**1 文は原則 1 行**（途中で改行すると別文に分割される。複行で書きたい SQL は 1 行にまとめるか、文字列リテラル内にだけ改行を含める）。**ログ行**のように `日時|種別|SELECT ...` 形式のときは、**単引用符・二重引用符の外側で最後の `|` より右**だけを SQL として正規化する（`SqlNormalization.extractSqlAfterLastUnquotedPipe`）。**パイプより後ろが空、または `;` だけ**（空白＋`;` のみ含む）の行は正規化・グリッド行に含めない（`isBlankOrSemicolonOnlySql`）
-- **「正規化して比較」** ボタンで各文を正規化し、**移行前（正規化）** / **移行後（正規化）** グリッドに 1 行ずつ表示する。列は **#**・**比較**・**距離**（対応ペアのレーベンシュタイン距離。片欠けは **—**）・**正規化SQL**（プレビュー）。文同士の対応は Needleman–Wunsch（置換コストはレーベンシュタイン距離）で決まり、対応したペアが等しければ **一致**、異なれば **差異**、片側にしか文が無い行は **—**。**GAPコスト** スライダーと **再比較** で対応付けをやり直せる（スライダー変更のみでは再計算しない）。**差異行のみ表示** チェックで **差異** の行だけに絞り込める（**#** は元の文番号のまま）。行を選ぶと下の **移行前（整形）** / **移行後（整形）** にその文の全文を表示する
-- **「正規化結果をコピー」**（グリッド下。右隣に **差異行のみ表示**）で、直近の正規化結果を **クリップボード** にコピーする。**HTML（CF_HTML）** と **テキスト（TSV）** の両方を載せる。Excel でセルに貼り付けると **HTML** 側が使われ、列 **#**・**比較結果**・**距離**・**移行前SQL**・**移行後SQL** の表になり、**罫線は各 `th`/`td` に明示**（ネストした枠なし表は使わない）。SQL は **1 セル内に複行**（改行は `mso-data-placement:same-cell` 付き `br` と `white-space:pre-wrap` でインデント保持）、整形ペイン相当の **キーワード／リテラル等の色**・**行単位差分の赤字** を反映（比較列は一致＝緑・差異＝赤）。見切れるときは Excel の **折り返して全体を表示する** をオン。**テキスト**は従来の TSV（SQL は 1 行化・**移行前SQL** 末尾 `;`・BOM）で、メモ帳等ではこちらが使われる
-- 正規化内容:
-  - **テーブルエイリアス** → FROM / JOIN の出現順で `t1`, `t2`, … に統一（Oracle の **`DUAL`** は別名を付けず、列も `tN` 修飾しない）
-  - **全カラム** → `tN.カラム名` で修飾（`EXISTS` / `IN` 内のサブクエリも同様に再帰正規化。`DUAL` 上の列は修飾なし）
-  - **SELECT項目のエイリアス** → 除去
-  - **SQLキーワード** → 大文字に統一（SELECT, FROM, NEXTVAL など）
-  - **空白** → 連続空白を1スペースに
-  - **整形（正規化グリッド・比較用）** → **SELECT** の `SELECT` / `GROUP BY` / `ORDER BY` の列・要素は **`列, 列, …`**（カンマ直前は空白なし・カンマ後に半角空白）で **1 行**。**INSERT** は `INTO 表 (列, 列, …)` と **`VALUES (式, 式, …)`** も同様に **1 行**（複数行 `VALUES` は `),` 改行後に次の `(…)` をインデント）。**INSERT … SET** / **ON DUPLICATE KEY UPDATE** も `列 = 式, …` で **1 行**。**UPDATE** の **SET** も **1 行**。`FROM` / `JOIN` / `ON` / `WHERE` の改行や **WHERE** / **ON** / **HAVING** の `AND`・`OR` 前改行、**`EXISTS` / `IN (SELECT …)`** 内の複行整形は共通。
-  - **整形（下段の整形ペイン・Excel HTML 貼り付けの SQL 表示）** → 上記と同じ句まわりはそのままに、**SELECT** / **GROUP BY** / **ORDER BY** の各要素を **行頭 `, ` ＋改行＋インデント**で複行。**INSERT** の **列リスト**と **`VALUES` 内の各式**も同様に複行（`VALUES` に列名コメント `/* … */` を付けるのはこちらのみ）。**UPDATE** の **SET** 代入も行頭カンマで複行。**DELETE** など他文種は正規化文字列のまま。
-  - **SELECT / INSERT / UPDATE / DELETE 以外**の文は句キーワード前での改行のみ（`formatPretty`）。A5 と完全同一ではなく、オプション画面の細かい設定までは再現していません
-- グリッドの **比較** 列で行ごとの一致/差異を表示。整形ペインの着色: **行単位の差分**は**赤**、**SQLキーワード**は**青**、**文字列・数値リテラル**は**紫**、**ブロックコメント**は**緑**、正規化別名 **`tN.`** および **`FROM` / `JOIN` 直後の `tN` 語**のみ**灰色**（`LOG_SEQUENCE.NEXTVAL` 等は灰色にしない）
-- 終了時に入力内容を保存し、次回起動時に復元
-- **H2DB(P6Spy)** タブで JDBC 接続し SQL を実行可能（AutoCommit 切替、コミット・ロールバック対応）
-- H2 接続時は **P6Spy** 経由のため、発行した SQL が **sqy.log**（実行ディレクトリ直下）に出力される
-- P6Spy の設定は **spy.properties.template**（リソース）を元に、初回起動時に実行ディレクトリへ **spy.properties** が自動作成される。ログファイル名等を変えたい場合は **spy.properties** を編集する
+- Paste **pre-migration SQL** and **post-migration SQL** into text areas (**multiple statements separated by newlines**; newlines inside `'` string literals do not split statements). **Prefer one statement per line** (a newline in the middle splits into another statement; for multi-line SQL, keep it on one line or put newlines only inside string literals). For **log-style** lines like `timestamp|type|SELECT ...`, only the part **to the right of the last `|` outside single or double quotes** is treated as SQL (`SqlNormalization.extractSqlAfterLastUnquotedPipe`). Lines where the part after the pipe is empty or only `;` (optional whitespace) are skipped (`isBlankOrSemicolonOnlySql`).
+- **Normalize and compare** normalizes each statement and shows one row per alignment step in the **pre (normalized)** / **post (normalized)** grids. Columns: **#**, **Compare**, **Distance** (Levenshtein for aligned pairs; **—** for gaps), **SQL** (preview; header switches between **normalized SQL** and **original SQL**). Alignment uses Needleman–Wunsch (substitution cost = Levenshtein). Pairs that match after normalization show **一致** (match); otherwise **差異** (diff); rows with a statement on only one side show **—**. **GAP cost** slider and **Re-align** recompute alignment (moving the slider alone does not). **Show diff rows only** filters to **差異** rows (**#** keeps original statement numbers). Selecting a row shows the full statement in the **pre (formatted)** / **post (formatted)** panes below. Radio buttons **Normalized SQL** / **Original SQL** switch both the grid SQL column and the formatted panes (original text is still pretty-printed like the panes; line-level diff highlighting applies in both modes).
+- **Copy normalized results** (under the grid, next to **Show diff rows only**) copies the latest comparison to the **clipboard** as **HTML (CF_HTML)** and **plain text (TSV)**. In Excel, the **HTML** flavor is used: columns **#**, **Compare**, **Distance**, **Pre (original SQL)**, **Post (original SQL)**, **Pre (normalized SQL)**, **Post (normalized SQL)**—each SQL cell uses the same formatting as the panes (syntax colors and line-level diff red). Borders are set on each `th`/`td` (no nested borderless tables). Long SQL is split into multiple rows at about **30 lines** per cell; **#**, **Compare**, and **Distance** are **repeated on each split row** (no `rowspan`) so Excel **filters** work per row. SQL uses multi-line cells (`br` with `mso-data-placement:same-cell` and `white-space:pre-wrap`). If text is clipped, turn on **Wrap text** in Excel. **Plain text** is TSV (SQL collapsed to one line, **Pre** columns get a trailing `;` when missing, UTF-8 BOM); Notepad and similar use this flavor.
+- Normalization behavior:
+  - **Table aliases** → `t1`, `t2`, … in **FROM** / **JOIN** order (Oracle **`DUAL`** gets no alias; columns from DUAL are not `tN`-qualified).
+  - **All columns** → qualified as `tN.column` (subqueries in `EXISTS` / `IN` are normalized recursively the same way; DUAL columns stay unqualified).
+  - **SELECT list aliases** → removed.
+  - **SQL keywords** → uppercased (SELECT, FROM, NEXTVAL, etc.).
+  - **Whitespace** → runs of whitespace collapsed to a single space.
+  - **Layout (for normalized grid / comparison)** → **SELECT** / **GROUP BY** / **ORDER BY** lists as **`col, col, …`** (no space before comma, space after) on **one line**. **INSERT**: `INTO table (col, …)` and **`VALUES (expr, …)`** also **one line** (multi-row `VALUES`: `),` then newline and indented next `(…)`). **INSERT … SET** / **ON DUPLICATE KEY UPDATE** as `col = expr, …` on **one line**. **UPDATE** **SET** on **one line**. Shared rules: line breaks for `FROM` / `JOIN` / `ON` / `WHERE`, `AND`/`OR` before breaks in **WHERE** / **ON** / **HAVING**, and multi-line bodies inside **`EXISTS` / `IN (SELECT …)`**.
+  - **Layout (formatted panes and Excel HTML)** → same clause structure, but **SELECT** / **GROUP BY** / **ORDER BY** items split with **leading `, `** on new lines + indent. **INSERT** column lists and **`VALUES`** expressions likewise (column-name `/* … */` comments on VALUES only in this mode). **UPDATE** **SET** assignments with leading comma per line. **DELETE** and other statement types use the normalized string or dedicated DELETE formatting where applicable.
+  - Statements **other than SELECT / INSERT / UPDATE / DELETE** get line breaks only before major clause keywords (`formatPretty`). Layout is A5:SQL Mk-2–inspired, not a pixel-perfect replica of every option screen.
+- The grid **Compare** column shows match/diff per row. Pane colors: **line-level diff** **red**, **keywords** **blue**, **string and numeric literals** **purple**, **block comments** **green**, normalized aliases **`tN.`** and the **`tN`** word right after **`FROM` / `JOIN`** only **gray** (e.g. `LOG_SEQUENCE.NEXTVAL` is not grayed).
+- On exit, inputs are saved and restored on next launch.
+- The **H2DB (P6Spy)** tab is **hidden by default** (`SHOW_H2_DB_TAB = false` in `SqlNormalizeApp`). Set it to `true` to show the tab again for JDBC execution (auto-commit toggle, commit/rollback).
+- When H2 is used through **P6Spy**, executed SQL is written to **sqy.log** in the working directory.
+- **spy.properties** is created on first run from **spy.properties.template** (classpath resource). Edit **spy.properties** to change the log file name and other P6Spy settings.
 
-## ビルド・実行
+## Build and run
 
 ```bash
-# ビルド
+# Build
 mvn compile
 
-# 実行（Swing GUI が起動）
+# Run (Swing GUI)
 mvn exec:java
 ```
 
-## 例
+## Example
 
-| 移行前 | 移行後 | 正規化後（同一） |
-|--------|--------|------------------|
+| Pre-migration | Post-migration | After normalization (identical) |
+|----------------|----------------|----------------------------------|
 | `SELECT a.id FROM users a` | `SELECT u.id FROM users u` | `SELECT t1.id FROM users t1` |
-| `FROM users a JOIN users b ON a.id = b.parent_id` | 同様に別エイリアス | `FROM users t1 JOIN users t2 ON t1.id = t2.parent_id` |
+| `FROM users a JOIN users b ON a.id = b.parent_id` | Same with different aliases | `FROM users t1 JOIN users t2 ON t1.id = t2.parent_id` |
 
-エイリアス名の違いだけなら正規化後に一致し、グリッドの **比較** 列がすべて **一致** なら実質同じ SQL と判断できます。
+If only alias names differ, normalized text matches; if every **Compare** cell is **一致**, you can treat the statements as the same SQL for comparison purposes.
 
 ---
 
-## メソッド一覧と説明
+## Method reference
 
-### クラス: `SqlNormalizeApp`
+### Class: `SqlNormalizeApp`
 
-GUI のメインクラス。ウィンドウの構築・イベント処理・入力の保存・復元を行う。
+Main GUI class: window layout, events, save/restore of inputs.
 
-| メソッド | 説明 |
-|----------|------|
-| `main(String[] args)` | エントリポイント。Look and Feel を設定し、Swing UI を EDT で起動する。 |
-| `createAndShow()` | メインウィンドウを構築し表示する。SQL比較タブは縦スプリット（入力＋正規化ボタン／結果部）のほか、結果部内も縦スプリット（正規化グリッド・コピー／整形ペイン）。 |
-| `createSqlArea(String title)` | 編集可能なSQL入力用テキストエリアを生成する。 |
-| `createReadOnlySqlPane()` | 読み取り専用の正規化結果表示用 JTextPane を生成する。 |
-| `setNormalizedSqlDisplay`（ペイン, SQL, 差分範囲） | 正規化SQLを表示。キーワード青・修飾/別名灰色の後、移行前後で異なる行に相当する文字範囲を赤字にする（行単位比較は [java-diff-utils](https://github.com/java-diff-utils/java-diff-utils)）。 |
-| `wrapWithScroll(JTextArea area, String title)` | テキストエリアをタイトル付きボーダーとスクロールでラップする。 |
-| `onNormalize()` | 改行区切りで文を分割し正規化、グリッド（#・比較・距離・正規化SQL）を更新、先頭行を選択して整形ペインに表示。 |
-| `copyNormalizedResultsToClipboard(Component)` | `HtmlWindowsClipboard` で HTML 表（CF_HTML）と TSV テキストを同時にコピー。Excel は HTML で色・改行を反映。 |
-| `getStatePath()` | 入力値の保存・読込に使うファイルのパス（カレントディレクトリ直下の `sql-normalize-state.txt`）を返す。 |
-| `loadState()` | 前回保存した移行前・移行後SQLをファイルから読み込み、入力エリアに復元する。 |
-| `saveState()` | 現在の移行前・移行後SQLをファイルに保存する。ウィンドウ終了時に呼ばれる。 |
+| Method | Description |
+|--------|-------------|
+| `main(String[] args)` | Entry point: sets look-and-feel and starts the Swing UI on the EDT. |
+| `createAndShow()` | Builds and shows the main window. SQL comparison uses vertical splits (inputs + normalize / results; results split into grid + copy row + formatted panes). |
+| `createSqlArea(String title)` | Creates an editable SQL text area. |
+| `createReadOnlySqlPane()` | Creates a read-only `JTextPane` for formatted SQL. |
+| `setNormalizedSqlDisplay` (pane, SQL, diff ranges) | Renders SQL with keyword/alias colors, then applies red for line-level diffs (via [java-diff-utils](https://github.com/java-diff-utils/java-diff-utils)). |
+| `wrapWithScroll(JTextArea area, String title)` | Wraps a text area in a titled border and scroll pane. |
+| `onNormalize()` | Splits statements by newline, normalizes, refreshes the grid (#, Compare, Distance, SQL), selects the first row, updates formatted panes. |
+| `copyNormalizedResultsToClipboard(Component)` | Copies HTML table (CF_HTML) and TSV via `HtmlWindowsClipboard`; Excel uses HTML for colors and line breaks. |
+| `getStatePath()` | Path to the state file (`sql-normalize-state.txt` in the working directory). |
+| `loadState()` | Restores saved pre/post SQL into the text areas. |
+| `saveState()` | Saves current pre/post SQL; called on window close. |
 
-### クラス: `SqlA5Formatter`
+### Class: `SqlA5Formatter`
 
-SELECT 文を A5:SQL Mk-2 を意識したレイアウトに整形する。`formatSelect(Statement)` は列リストを 1 行（正規化用）。`formatSelect(Statement, boolean)` の第 2 引数が `true` のとき SELECT / GROUP BY / ORDER BY を行頭カンマで複行（整形ペイン用）。WHERE / ON / HAVING は `AND`・`OR` の前で改行し、サブクエリは `appendSelectBody` で複行にする。
+Formats SELECT statements in an A5:SQL Mk-2–like layout. `formatSelect(Statement)` keeps list clauses on one line (normalization). `formatSelect(Statement, boolean)` with `true` splits SELECT / GROUP BY / ORDER BY with leading commas (display panes). WHERE / ON / HAVING break before `AND`/`OR`; subqueries use `appendSelectBody`.
 
-### クラス: `SqlInsertFormatter`
+### Class: `SqlInsertFormatter`
 
-`formatInsert(Insert)` は列・`VALUES` を 1 行（正規化用）。`formatInsert(Insert, valueColumnComments, leadingCommaLists)` で列・`VALUES` を行頭カンマ複行にし、列名コメントを付与可能（整形ペイン用）。`WITH` 内の SELECT は `appendSelectBody` にフラグを渡す。
+`formatInsert(Insert)` keeps columns and VALUES on one line (normalization). `formatInsert(Insert, valueColumnComments, leadingCommaLists)` can emit leading-comma multiline layout and column comments (display panes). WITH bodies delegate to `appendSelectBody`.
 
-### クラス: `SqlUpdateFormatter`
+### Class: `SqlUpdateFormatter`
 
-`formatUpdate(Update)` は `SET` を 1 行（正規化用）。`formatUpdate(Update, true)` で `SET` を行頭カンマ複行（整形ペイン用）。`WHERE` は `appendExpressionBrokenOnAndOr`、`ORDER BY` は要素ごとに改行＋インデント。`UPDATE … FROM` の `JOIN` は `appendJoin` を利用する。
+`formatUpdate(Update)` keeps SET on one line (normalization). `formatUpdate(Update, true)` uses leading-comma multiline SET (display panes). WHERE uses `appendExpressionBrokenOnAndOr`; ORDER BY breaks per element. `UPDATE … FROM` joins use `appendJoin`.
 
-### クラス: `SqlDeleteFormatter`
+### Class: `SqlDeleteFormatter`
 
-`DELETE` 文を `DELETE` / `FROM` / 対象表を改行＋インデントで整形し、`WHERE` は `appendExpressionBrokenOnAndOr` を利用する（`formatDelete` のみ公開）。多表指定・`USING`・`JOIN`・`ORDER BY`・`LIMIT` にも対応する。
+Formats `DELETE` with `DELETE` / `FROM` / table on separate indented lines; WHERE uses `appendExpressionBrokenOnAndOr` (`formatDelete` is public). Supports multi-table forms, USING, JOIN, ORDER BY, LIMIT.
 
-### クラス: `SqlNormalizer`
+### Class: `SqlNormalizer`
 
-SQL 文を正規化するクラス。テーブル/カラムのエイリアス統一・キーワード大文字化・空白正規化・上記 A5 風整形を行う。
+Normalizes SQL: alias unification, keyword casing, whitespace, and A5-style layout.
 
-| メソッド | 説明 |
-|----------|------|
-| `normalize(String sql)` | **公開API。** SQL 文字列を正規化する（整形付き）。null の場合は空文字を返す。パースに失敗した場合は空白・キーワードのみ正規化し整形する。 |
-| `formatNormalizedSqlForDisplayPane(String)` | 正規化済み 1 文を整形ペイン向けに再整形（SELECT/INSERT/UPDATE の列・VALUES・SET を行頭カンマ複行、INSERT の `VALUES` に列名コメント可）。 |
-| `keywordHighlightPattern()` | 正規化表示用。`KEYWORDS` を単語境界でマッチする `Pattern`（長い語を先にマッチ）。静的メソッド。 |
-| `formatPretty(String oneLine)` | 1行に潰したSQLを、主要キーワードの前で改行・インデントする。単体利用も可。 |
-| `compareIgnoreLayout(String a, String b)` | 改行・行頭インデントを除いた文字列同士で比較する（静的メソッド）。 |
-| `normalizeParsed(Statement stmt)` | パース済みの Statement を正規化し、文字列に戻して返す。 |
-| `normalizePlainSelect`（内部） | 1 つの PlainSelect を正規化。`t` 番号は呼び出し元で共有（サブクエリで 1 に戻さない）。相関列は外側スコープの別名→`tN` で修飾。 |
-| `getAliasOrTableName(FromItem item)` | FromItem のエイリアス名、またはエイリアスが無い場合はテーブル名を返す。 |
-| `setFromItemCanonicalAlias(FromItem item, String canonical)` | FROM 句の要素に正規化後の別名（`t1`, `t2`, …）を設定する。 |
-| `normalizeWhitespaceAndKeywords(String sql)` | 空白を単一スペースにし、KEYWORDS に含まれる語を大文字に変換する。 |
-| `normalizeFallback(String sql)` | パースに失敗した場合のフォールバック。空白とキーワードのみ正規化する。 |
+| Method | Description |
+|--------|-------------|
+| `normalize(String sql)` | **Public API.** Normalizes a SQL string (with layout). Returns `""` for null. On parse failure, normalizes whitespace and keywords only. |
+| `formatNormalizedSqlForDisplayPane(String)` | Re-parses one statement and formats for the panes / Excel (leading-comma lists for SELECT/INSERT/UPDATE; DELETE via `SqlDeleteFormatter`; VALUES column comments for INSERT when applicable). |
+| `keywordHighlightPattern()` | `Pattern` for keyword highlighting (longer tokens first). Static. |
+| `formatPretty(String oneLine)` | Inserts line breaks and indent before major keywords on a single-line SQL string. |
+| `compareIgnoreLayout(String a, String b)` | Compares strings ignoring newlines and leading indentation on each line. Static. |
+| `normalizeParsed(Statement stmt)` | Normalizes a parsed `Statement` and returns the string. |
+| `normalizePlainSelect` (internal) | Normalizes one `PlainSelect`; `t` numbers are shared with the caller (not reset per subquery). Correlated columns use outer alias → `tN`. |
+| `getAliasOrTableName(FromItem item)` | Returns alias or, if absent, table name. |
+| `setFromItemCanonicalAlias(FromItem item, String canonical)` | Sets normalized alias (`t1`, `t2`, …) on a FROM item. |
+| `normalizeWhitespaceAndKeywords(String sql)` | Collapses whitespace and uppercases tokens in `KEYWORDS`. |
+| `normalizeFallback(String sql)` | Fallback when parsing fails: whitespace and keywords only. |
 
-### 主要フィールド（SqlNormalizer）
+### Main fields (`SqlNormalizer`)
 
-| フィールド | 説明 |
-|------------|------|
-| `MULTI_SPACE` | 連続する空白を 1 つにまとめるための正規表現。 |
-| `KEYWORDS` | 大文字に統一する SQL キーワードの集合（SELECT, FROM, NEXTVAL, CURRVAL など）。 |
+| Field | Description |
+|-------|-------------|
+| `MULTI_SPACE` | Regex collapsing runs of whitespace. |
+| `KEYWORDS` | Keywords uppercased during normalization (SELECT, FROM, NEXTVAL, CURRVAL, etc.). |
