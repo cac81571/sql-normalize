@@ -22,6 +22,12 @@ import javax.swing.text.StyledEditorKit;
 import javax.swing.text.View;
 import javax.swing.text.ViewFactory;
 import java.awt.*;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.dnd.DnDConstants;
+import java.awt.dnd.DropTarget;
+import java.awt.dnd.DropTargetAdapter;
+import java.awt.dnd.DropTargetDropEvent;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -214,6 +220,8 @@ public class SqlNormalizeApp {
         JPanel inputPanel = new JPanel(new GridLayout(1, 2, 12, 0));
         beforeSqlArea = createSqlArea("移行前 SQL");
         afterSqlArea = createSqlArea("移行後 SQL");
+        installSqlFileDropOnTextArea(beforeSqlArea);
+        installSqlFileDropOnTextArea(afterSqlArea);
         JScrollPane beforeInputScroll = wrapWithScroll(beforeSqlArea, "移行前 SQL（改行区切りで複数可）");
         JScrollPane afterInputScroll = wrapWithScroll(afterSqlArea, "移行後 SQL（改行区切りで複数可）");
         linkScrollPaneSync(beforeInputScroll, afterInputScroll);
@@ -436,6 +444,50 @@ public class SqlNormalizeApp {
         area.setLineWrap(false);
         area.setTabSize(4);
         return area;
+    }
+
+    /**
+     * ファイルをドロップしたとき UTF-8 で読み込み、エリア全文を置き換える。
+     * {@link TransferHandler} は差し替えない（クリップボード貼り付けはそのまま）。
+     */
+    private static void installSqlFileDropOnTextArea(JTextArea area) {
+        new DropTarget(area, DnDConstants.ACTION_COPY, new DropTargetAdapter() {
+            @Override
+            public void drop(DropTargetDropEvent dtde) {
+                if (!dtde.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
+                    dtde.rejectDrop();
+                    return;
+                }
+                try {
+                    dtde.acceptDrop(DnDConstants.ACTION_COPY);
+                    @SuppressWarnings("unchecked")
+                    List<File> files = (List<File>) dtde.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
+                    if (files == null || files.isEmpty()) {
+                        dtde.dropComplete(false);
+                        return;
+                    }
+                    StringBuilder sb = new StringBuilder();
+                    for (File f : files) {
+                        if (f == null || !f.isFile()) {
+                            continue;
+                        }
+                        if (sb.length() > 0) {
+                            sb.append("\n\n");
+                        }
+                        sb.append(Files.readString(f.toPath(), StandardCharsets.UTF_8));
+                    }
+                    if (sb.length() == 0) {
+                        dtde.dropComplete(false);
+                        return;
+                    }
+                    area.setText(sb.toString());
+                    area.setCaretPosition(0);
+                    dtde.dropComplete(true);
+                } catch (Exception ex) {
+                    dtde.dropComplete(false);
+                }
+            }
+        });
     }
 
     /**
